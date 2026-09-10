@@ -244,6 +244,7 @@ COUNTRY_FLAGS = {
     "Nigeria": "\U0001f1f3\U0001f1ec", "Ghana": "\U0001f1ec\U0001f1ed",
     "Egypt": "\U0001f1ea\U0001f1ec", "Uruguay": "\U0001f1fa\U0001f1fe",
     "Colombia": "\U0001f1e8\U0001f1f4", "Chile": "\U0001f1e8\U0001f1f1",
+    "Singapore": "\U0001f1f8\U0001f1ec", "Tajikistan": "\U0001f1f9\U0001f1ef",
     "Cook Islands": "\U0001f1e8\U0001f1f0", "Turkey": "\U0001f1f9\U0001f1f7",
     "Paraguay": "\U0001f1f5\U0001f1fe", "Oman": "\U0001f1f4\U0001f1f2",
     "Lebanon": "\U0001f1f1\U0001f1e7", "DR Congo": "\U0001f1e8\U0001f1e9",
