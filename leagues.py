@@ -1,456 +1,299 @@
-#!/usr/bin/env python3
 """
-Builds a single .ics calendar from free, keyless sports data feeds.
+Configuration for the sports calendar generator.
 
-Sources
--------
-fixturedownload.com   fixtures, venues and results for most leagues
-api.jolpi.ca          Formula 1 session times (Ergast-compatible)
+Everything you might want to change lives in this file. generate.py reads it
+and never needs editing for a new team or a new season.
 
-Run:  python3 generate.py
-Out:  docs/calendar.ics  and  docs/diagnostics.txt
+HOW A SEASON ROLLS OVER
+-----------------------
+fixturedownload uses a slug per season, e.g. "epl-2026" for 2026/27.
+When a new season starts, change the "slug" and "season" values here only.
 
-Nothing here needs an API key, an account or a payment method.
+TEAM NAMES
+----------
+"follow" holds the names EXACTLY as the data feed writes them (often short,
+e.g. "Broncos"). "names" maps a feed name to the name shown in the calendar.
+If a feed name is not in "names", the feed name is used as-is and the run
+writes it to docs/diagnostics.txt so it can be corrected.
 """
 
-import csv
-import datetime as dt
-import io
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
+# ---------------------------------------------------------------------------
+# Sports: emoji, title format, and how long an event blocks out (minutes)
+# ---------------------------------------------------------------------------
+SPORTS = {
+    "football":          {"emoji": "\u26bd\ufe0f", "format": "vs", "minutes": 120},
+    "afl":               {"emoji": "\U0001f3c9", "format": "vs", "minutes": 165},
+    "rugby_league":      {"emoji": "\U0001f3c9", "format": "vs", "minutes": 110},
+    "rugby_union":       {"emoji": "\U0001f3c9", "format": "vs", "minutes": 120},
+    "basketball_us":     {"emoji": "\U0001f3c0", "format": "@",  "minutes": 150},
+    "basketball_au":     {"emoji": "\U0001f3c0", "format": "vs", "minutes": 120},
+    "baseball":          {"emoji": "\u26be\ufe0f", "format": "@",  "minutes": 180},
+    "ice_hockey":        {"emoji": "\U0001f3d2", "format": "@",  "minutes": 150},
+    "american_football": {"emoji": "\U0001f3c8", "format": "@",  "minutes": 195},
+    "cricket_t20":       {"emoji": "\U0001f3cf", "format": "vs", "minutes": 210},
+    "cricket_odi":       {"emoji": "\U0001f3cf", "format": "vs", "minutes": 480},
+    "cricket_test":      {"emoji": "\U0001f3cf", "format": "vs", "minutes": 420},
+    "f1":                {"emoji": "\U0001f3ce\ufe0f", "format": None, "minutes": None},
+}
 
-import leagues as cfg
+# ---------------------------------------------------------------------------
+# Leagues fed by fixturedownload.com (free, no API key)
+# ---------------------------------------------------------------------------
+# gender:        "M" or "W". Appended in brackets after every team name.
+# international: True means use country flags and Australian nicknames.
+# follow:        feed team names to keep. Empty list = keep every match.
+# competition:   line 1 of the calendar notes.
+# stage:         line 2. "{round}" is replaced by the feed's round label.
+# ---------------------------------------------------------------------------
+LEAGUES = [
+    # ---- Football, Chelsea -------------------------------------------------
+    {"slug": "epl-2026", "sport": "football", "gender": "M",
+     "follow": ["Chelsea"], "names": {"Bournemouth": "Bournemouth", "Brighton": "Brighton & Hove Albion",
+               "Coventry": "Coventry City", "Hull": "Hull City",
+               "Ipswich": "Ipswich Town", "Leeds": "Leeds United",
+               "Man City": "Manchester City", "Man Utd": "Manchester United",
+               "Newcastle": "Newcastle United",
+               "Nott'm Forest": "Nottingham Forest",
+               "Spurs": "Tottenham Hotspur"},
+     "competition": "Premier League", "stage": "2026/27 Regular Season, {round}"},
 
-# Tried in order until one returns something we can read.
-FD_URLS = [
-    "https://fixturedownload.com/download/json/{slug}",
-    "https://fixturedownload.com/feed/json/{slug}",
-    "https://fixturedownload.com/view/json/{slug}",
-    "https://fixturedownload.com/download/csv/{slug}",
+    {"slug": "wsl-2026", "sport": "football", "gender": "W",
+     "follow": ["Chelsea"], "names": {},
+     "competition": "Women's Super League", "stage": "2026/27 Regular Season, {round}"},
+
+    {"slug": "champions-league-2026", "sport": "football", "gender": "M",
+     "follow": ["Chelsea"], "names": {"Atleti": "Atletico Madrid", "B. Dortmund": "Borussia Dortmund",
+               "Bayern M\u00fcnchen": "Bayern Munich", "Inter": "Inter Milan",
+               "Leipzig": "RB Leipzig", "Man City": "Manchester City",
+               "Man Utd": "Manchester United", "PSV": "PSV Eindhoven",
+               "Paris": "Paris Saint-Germain", "S. Bratislava": "Slovan Bratislava",
+               "Shakhtar": "Shakhtar Donetsk", "Slavia Praha": "Slavia Prague",
+               "Sporting CP": "Sporting Lisbon"},
+     "competition": "UEFA Champions League", "stage": "2026/27 Season, {round}"},
+
+    {"slug": "europa-league-2026", "sport": "football", "gender": "M",
+     "follow": ["Chelsea"], "names": {},
+     "competition": "UEFA Europa League", "stage": "2026/27 Season, {round}"},
+
+    {"slug": "conference-league-2026", "sport": "football", "gender": "M",
+     "follow": ["Chelsea"], "names": {},
+     "competition": "UEFA Conference League", "stage": "2026/27 Season, {round}"},
+
+    # ---- Football, Perth Glory --------------------------------------------
+    {"slug": "aleague-men-2026", "sport": "football", "gender": "M",
+     "follow": ["Perth Glory", "Perth"], "names": {"Auckland": "Auckland FC", "Macarthur": "Macarthur FC",
+               "Sydney": "Sydney FC", "Perth": "Perth Glory"},
+     "competition": "A-League Men", "stage": "2026/27 Regular Season, {round}"},
+
+    {"slug": "aleague-women-2026", "sport": "football", "gender": "W",
+     "follow": ["Perth Glory", "Perth"], "names": {"Perth": "Perth Glory"},
+     "competition": "A-League Women", "stage": "2026/27 Regular Season, {round}"},
+
+    {"slug": "australia-cup-2026", "sport": "football", "gender": "M",
+     "follow": ["Perth Glory", "Perth"], "names": {"Perth": "Perth Glory"},
+     "competition": "Australia Cup", "stage": "2026 {round}"},
+
+    # ---- Australian rules, Essendon ---------------------------------------
+    {"slug": "afl-2026", "sport": "afl", "gender": "M",
+     "follow": ["Essendon"], "names": {"GWS GIANTS": "GWS Giants", "Gold Coast SUNS": "Gold Coast Suns"},
+     "competition": "Australian Football League", "stage": "2026 Season, {round}"},
+
+    {"slug": "aflw-2026", "sport": "afl", "gender": "W",
+     "follow": ["Essendon"], "names": {"GWS GIANTS": "GWS Giants", "Gold Coast SUNS": "Gold Coast Suns"},
+     "competition": "AFL Women's", "stage": "2026 Season, {round}"},
+
+    # ---- Rugby league, Brisbane Broncos -----------------------------------
+    {"slug": "nrl-2026", "sport": "rugby_league", "gender": "M",
+     "follow": ["Broncos"], "names": {"Broncos": "Brisbane Broncos",
+               "Bulldogs": "Canterbury-Bankstown Bulldogs",
+               "Cowboys": "North Queensland Cowboys", "Dolphins": "Dolphins",
+               "Dragons": "St George Illawarra Dragons",
+               "Eels": "Parramatta Eels", "Knights": "Newcastle Knights",
+               "Panthers": "Penrith Panthers",
+               "Rabbitohs": "South Sydney Rabbitohs", "Raiders": "Canberra Raiders",
+               "Roosters": "Sydney Roosters",
+               "Sea Eagles": "Manly Warringah Sea Eagles",
+               "Sharks": "Cronulla-Sutherland Sharks", "Storm": "Melbourne Storm",
+               "Titans": "Gold Coast Titans", "Warriors": "New Zealand Warriors"},
+     "competition": "National Rugby League", "stage": "2026 Season, {round}"},
+
+    {"slug": "nrlw-2026", "sport": "rugby_league", "gender": "W",
+     "follow": ["Broncos"], "names": {"Broncos": "Brisbane Broncos"},
+     "competition": "NRL Women's Premiership", "stage": "2026 Season, {round}"},
+
+    # ---- Rugby union, Western Force ---------------------------------------
+    {"slug": "super-rugby-pacific-2026", "sport": "rugby_union", "gender": "M",
+     "follow": ["Western Force", "Force"], "names": {"Force": "Western Force"},
+     "competition": "Super Rugby Pacific", "stage": "2026 Season, {round}"},
+
+    # ---- Basketball --------------------------------------------------------
+    {"slug": "nba-2026", "sport": "basketball_us", "gender": "M",
+     "follow": ["Denver Nuggets"], "names": {},
+     "competition": "National Basketball Association",
+     "stage": "2026/27 Regular Season"},
+
+    {"slug": "nbl-2026", "sport": "basketball_au", "gender": "M",
+     "follow": ["Perth Wildcats", "Perth"], "names": {"Perth": "Perth Wildcats"},
+     "competition": "National Basketball League", "stage": "2026/27 Season, {round}"},
+
+    {"slug": "wnbl-2026", "sport": "basketball_au", "gender": "W",
+     "follow": ["Perth Lynx", "Perth"], "names": {"Perth": "Perth Lynx"},
+     "competition": "Women's National Basketball League",
+     "stage": "2026/27 Season, {round}"},
+
+    # ---- Baseball, ice hockey, American football --------------------------
+    {"slug": "mlb-2026", "sport": "baseball", "gender": "M",
+     "follow": ["Colorado Rockies"], "names": {},
+     "competition": "Major League Baseball", "stage": "2026 Regular Season"},
+
+    {"slug": "nhl-2026", "sport": "ice_hockey", "gender": "M",
+     "follow": ["Colorado Avalanche"], "names": {},
+     "competition": "National Hockey League", "stage": "2026/27 Regular Season"},
+
+    {"slug": "nfl-2026", "sport": "american_football", "gender": "M",
+     "follow": ["Denver Broncos"], "names": {},
+     "competition": "National Football League", "stage": "2026 Season, {round}"},
+
+    # ---- Cricket, Perth Scorchers -----------------------------------------
+    {"slug": "bbl-2026", "sport": "cricket_t20", "gender": "M",
+     "follow": ["Perth Scorchers", "Scorchers"],
+     "names": {"Scorchers": "Perth Scorchers"},
+     "competition": "Big Bash League", "stage": "2026/27 Season, {round}"},
+
+    {"slug": "wbbl-2026", "sport": "cricket_t20", "gender": "W",
+     "follow": ["Perth Scorchers", "Scorchers"],
+     "names": {"Scorchers": "Perth Scorchers"},
+     "competition": "Women's Big Bash League", "stage": "2026 Season, {round}"},
+
+    # ---- Australian national teams, tournaments only -----------------------
+    {"slug": "rugby-league-world-cup-2026", "sport": "rugby_league", "gender": "M",
+     "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
+               "USA": "United States", "Congo DR": "DR Congo",
+               "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
+     "competition": "Rugby League World Cup 2026", "stage": "{round}"},
+
+    {"slug": "fifa-world-cup-2026", "sport": "football", "gender": "M",
+     "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
+               "USA": "United States", "Congo DR": "DR Congo",
+               "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
+     "competition": "FIFA World Cup 2026", "stage": "{round}"},
+
+    {"slug": "mens-t20-world-cup-2026", "sport": "cricket_t20", "gender": "M",
+     "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
+               "USA": "United States", "Congo DR": "DR Congo",
+               "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
+     "competition": "ICC Men's T20 World Cup 2026", "stage": "{round}"},
 ]
-JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}.json?limit=100"
-USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
-TIMEOUT = 45
 
-diagnostics = []
+# ---------------------------------------------------------------------------
+# Formula 1 (Jolpica API, free, no key)
+# ---------------------------------------------------------------------------
+F1_SEASON = 2026
+F1_COMPETITION = "2026 Formula 1 World Championship"
+F1_INCLUDE_PRACTICE = True
 
+# Session key in the API -> (title text, minutes)
+F1_SESSIONS = {
+    "FirstPractice":  ("Practice 1", 60),
+    "SecondPractice": ("Practice 2", 60),
+    "ThirdPractice":  ("Practice 3", 60),
+    "SprintQualifying": ("Sprint Qualifying", 45),
+    "SprintShootout": ("Sprint Qualifying", 45),
+    "Sprint":         ("Sprint", 30),
+    "Qualifying":     ("Qualifying", 60),
+    "Race":           ("Grand Prix", 120),
+}
 
-def note(line):
-    """Record something worth a human look after the run."""
-    diagnostics.append(line)
-    print(line)
+# ---------------------------------------------------------------------------
+# International teams: flags and Australian nicknames
+# ---------------------------------------------------------------------------
+AUS_NICKNAMES = {
+    ("football", "M"): "Socceroos",
+    ("football", "W"): "Matildas",
+    ("rugby_union", "M"): "Wallabies",
+    ("rugby_union", "W"): "Wallaroos",
+    ("rugby_league", "M"): "Kangaroos",
+    ("rugby_league", "W"): "Jillaroos",
+    ("basketball_us", "M"): "Boomers",
+    ("basketball_us", "W"): "Opals",
+    ("basketball_au", "M"): "Boomers",
+    ("basketball_au", "W"): "Opals",
+    # Cricket has no nickname, so it falls back to (M) / (W).
+}
 
-
-def fetch_text(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return resp.read().decode("utf-8-sig", errors="replace")
-
-
-def fetch_json(url):
-    return json.loads(fetch_text(url))
+COUNTRY_FLAGS = {
+    "Australia": "\U0001f1e6\U0001f1fa", "China": "\U0001f1e8\U0001f1f3",
+    "Japan": "\U0001f1ef\U0001f1f5", "South Korea": "\U0001f1f0\U0001f1f7",
+    "New Zealand": "\U0001f1f3\U0001f1ff", "England": "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",
+    "Scotland": "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+    "Wales": "\U0001f3f4\U000e0067\U000e0062\U000e0077\U000e006c\U000e0073\U000e007f",
+    "Ireland": "\U0001f1ee\U0001f1ea", "France": "\U0001f1eb\U0001f1f7",
+    "Italy": "\U0001f1ee\U0001f1f9", "Spain": "\U0001f1ea\U0001f1f8",
+    "Germany": "\U0001f1e9\U0001f1ea", "Portugal": "\U0001f1f5\U0001f1f9",
+    "Netherlands": "\U0001f1f3\U0001f1f1", "Belgium": "\U0001f1e7\U0001f1ea",
+    "Argentina": "\U0001f1e6\U0001f1f7", "Brazil": "\U0001f1e7\U0001f1f7",
+    "United States": "\U0001f1fa\U0001f1f8", "USA": "\U0001f1fa\U0001f1f8",
+    "Canada": "\U0001f1e8\U0001f1e6", "Mexico": "\U0001f1f2\U0001f1fd",
+    "India": "\U0001f1ee\U0001f1f3", "Pakistan": "\U0001f1f5\U0001f1f0",
+    "South Africa": "\U0001f1ff\U0001f1e6", "Sri Lanka": "\U0001f1f1\U0001f1f0",
+    "Bangladesh": "\U0001f1e7\U0001f1e9", "Afghanistan": "\U0001f1e6\U0001f1eb",
+    "West Indies": "\U0001f3f4", "Zimbabwe": "\U0001f1ff\U0001f1fc",
+    "Fiji": "\U0001f1eb\U0001f1ef", "Samoa": "\U0001f1fc\U0001f1f8",
+    "Tonga": "\U0001f1f9\U0001f1f4", "Papua New Guinea": "\U0001f1f5\U0001f1ec",
+    "Saudi Arabia": "\U0001f1f8\U0001f1e6", "Qatar": "\U0001f1f6\U0001f1e6",
+    "Iran": "\U0001f1ee\U0001f1f7", "Iraq": "\U0001f1ee\U0001f1f6",
+    "Vietnam": "\U0001f1fb\U0001f1f3", "Thailand": "\U0001f1f9\U0001f1ed",
+    "Philippines": "\U0001f1f5\U0001f1ed", "Indonesia": "\U0001f1ee\U0001f1e9",
+    "Uzbekistan": "\U0001f1fa\U0001f1ff", "Jordan": "\U0001f1ef\U0001f1f4",
+    "Chinese Taipei": "\U0001f1f9\U0001f1fc", "North Korea": "\U0001f1f0\U0001f1f5",
+    "Norway": "\U0001f1f3\U0001f1f4", "Sweden": "\U0001f1f8\U0001f1ea",
+    "Denmark": "\U0001f1e9\U0001f1f0", "Switzerland": "\U0001f1e8\U0001f1ed",
+    "Croatia": "\U0001f1ed\U0001f1f7", "Poland": "\U0001f1f5\U0001f1f1",
+    "Morocco": "\U0001f1f2\U0001f1e6", "Senegal": "\U0001f1f8\U0001f1f3",
+    "Nigeria": "\U0001f1f3\U0001f1ec", "Ghana": "\U0001f1ec\U0001f1ed",
+    "Egypt": "\U0001f1ea\U0001f1ec", "Uruguay": "\U0001f1fa\U0001f1fe",
+    "Colombia": "\U0001f1e8\U0001f1f4", "Chile": "\U0001f1e8\U0001f1f1",
+    "Cook Islands": "\U0001f1e8\U0001f1f0", "Turkey": "\U0001f1f9\U0001f1f7",
+    "Paraguay": "\U0001f1f5\U0001f1fe", "Oman": "\U0001f1f4\U0001f1f2",
+    "Lebanon": "\U0001f1f1\U0001f1e7", "DR Congo": "\U0001f1e8\U0001f1e9",
+    "Czechia": "\U0001f1e8\U0001f1ff", "Austria": "\U0001f1e6\U0001f1f9",
+    "Algeria": "\U0001f1e9\U0001f1ff", "Tunisia": "\U0001f1f9\U0001f1f3",
+    "Ecuador": "\U0001f1ea\U0001f1e8", "Panama": "\U0001f1f5\U0001f1e6",
+    "Haiti": "\U0001f1ed\U0001f1f9", "Cura\u00e7ao": "\U0001f1e8\U0001f1fc",
+    "Cabo Verde": "\U0001f1e8\U0001f1fb", "C\u00f4te d'Ivoire": "\U0001f1e8\U0001f1ee",
+    "Bosnia and Herzegovina": "\U0001f1e7\U0001f1e6",
+    "Namibia": "\U0001f1f3\U0001f1e6", "Nepal": "\U0001f1f3\U0001f1f5",
+    "United Arab Emirates": "\U0001f1e6\U0001f1ea",
+}
 
 
 # ---------------------------------------------------------------------------
-# Reading the fixture feeds
+# Extra time markers appended to the event title after the scores
 # ---------------------------------------------------------------------------
-
-def tidy_key(name):
-    return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-
-def rows_from_csv(text):
-    reader = csv.DictReader(io.StringIO(text))
-    rows = []
-    for raw in reader:
-        rows.append({tidy_key(k): (v or "").strip()
-                     for k, v in raw.items() if k})
-    return rows
-
-
-def rows_from_json(text):
-    payload = json.loads(text)
-    if isinstance(payload, dict):
-        for key in ("matches", "fixtures", "data", "results"):
-            if isinstance(payload.get(key), list):
-                payload = payload[key]
-                break
-    if not isinstance(payload, list):
-        raise ValueError("JSON was not a list of matches")
-    return [{tidy_key(k): v for k, v in row.items()} for row in payload]
-
-
-def load_feed(slug):
-    """Return (rows, url_that_worked) or (None, None)."""
-    last_error = None
-    for template in FD_URLS:
-        url = template.format(slug=slug)
-        try:
-            text = fetch_text(url)
-        except urllib.error.HTTPError as err:
-            last_error = "HTTP %s" % err.code
-            continue
-        except Exception as err:  # noqa: BLE001
-            last_error = str(err)
-            continue
-
-        for parser in (rows_from_json, rows_from_csv):
-            try:
-                rows = parser(text)
-            except Exception as err:  # noqa: BLE001
-                last_error = str(err)
-                continue
-            if rows and any(rows[0].get(k) for k in ("hometeam", "home")):
-                return rows, url
-            last_error = "parsed but found no team columns"
-
-    note("SKIPPED %s: no readable feed (%s)" % (slug, last_error))
-    return None, None
-
+# NOTE: the fixture feed does not say whether a match went to extra time, so
+# nothing uses this yet. It is wired up ready for a phase two results source.
+EXTRA_TIME = {
+    "football":          {"aet": "a.e.t"},
+    "rugby_union":       {"aet": "a.e.t"},
+    "afl":               {"aet": "a.e.t"},
+    "rugby_league":      {"gp": "GP"},
+    "basketball_us":     {"ot": "OT", "2ot": "2OT", "3ot": "3OT", "4ot": "4OT"},
+    "basketball_au":     {"ot": "OT", "2ot": "2OT", "3ot": "3OT", "4ot": "4OT"},
+    "ice_hockey":        {"ot": "OT", "so": "SO"},
+    "american_football": {"ot": "OT", "2ot": "2OT"},
+    "baseball":          {},   # written as F/10, F/11 from the innings count
+    "cricket_t20":       {"so": "S/O"},
+    "cricket_odi":       {"so": "S/O"},
+    "cricket_test":      {},
+}
 
 # ---------------------------------------------------------------------------
-# Small helpers
+# Output
 # ---------------------------------------------------------------------------
-
-DATE_FORMATS = (
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d %H:%M",
-    "%d/%m/%Y %H:%M:%S",
-    "%d/%m/%Y %H:%M",
-    "%m/%d/%Y %H:%M:%S",
-    "%m/%d/%Y %H:%M",
-)
-
-
-def parse_utc(value):
-    if not value:
-        return None
-    text = str(value).strip().replace("Z", "").replace("T", " ").strip()
-    for fmt in DATE_FORMATS:
-        try:
-            return dt.datetime.strptime(text, fmt).replace(tzinfo=dt.timezone.utc)
-        except ValueError:
-            continue
-    note("WARNING could not read date: %r" % value)
-    return None
-
-
-def parse_iso_date_time(date_text, time_text):
-    """Jolpica writes date '2026-08-23' and time '13:00:00Z' separately."""
-    if not date_text or not time_text:
-        return None
-    text = "%s %s" % (date_text.strip(), time_text.strip().replace("Z", ""))
-    try:
-        return dt.datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=dt.timezone.utc)
-    except ValueError:
-        note("WARNING could not read F1 time: %r %r" % (date_text, time_text))
-        return None
-
-
-def parse_scores(row):
-    """Scores arrive either as two columns or as one 'Result' string."""
-    home = row.get("hometeamscore", row.get("homescore"))
-    away = row.get("awayteamscore", row.get("awayscore"))
-    if home not in (None, "") and away not in (None, ""):
-        return home, away
-    result = str(row.get("result", "") or "").strip()
-    if "-" in result:
-        left, _, right = result.partition("-")
-        left, right = left.strip(), right.strip()
-        if left.isdigit() and right.isdigit():
-            return left, right
-    return None, None
-
-
-def stamp(moment):
-    return moment.strftime("%Y%m%dT%H%M%SZ")
-
-
-def escape(text):
-    if text is None:
-        return ""
-    return (str(text).replace("\\", "\\\\").replace(";", "\\;")
-            .replace(",", "\\,").replace("\r\n", "\\n").replace("\n", "\\n"))
-
-
-def _joins_to_previous(char):
-    """True if breaking a line before this character would break an emoji."""
-    code = ord(char)
-    return (code == 0x200D or code == 0xFE0F
-            or 0x1F3FB <= code <= 0x1F3FF
-            or 0x1F1E6 <= code <= 0x1F1FF
-            or 0xE0000 <= code <= 0xE007F
-            or 0x0300 <= code <= 0x036F)
-
-
-def fold(line):
-    """iCalendar lines must not exceed 75 octets. Continuations start a space."""
-    if len(line.encode("utf-8")) <= 73:
-        return line
-
-    clusters, cluster = [], ""
-    for char in line:
-        if cluster and _joins_to_previous(char):
-            cluster += char
-        else:
-            if cluster:
-                clusters.append(cluster)
-            cluster = char
-    if cluster:
-        clusters.append(cluster)
-
-    pieces, current, size = [], [], 0
-    for item in clusters:
-        width = len(item.encode("utf-8"))
-        if current and size + width > 73:
-            pieces.append("".join(current))
-            current, size = [], 1
-        current.append(item)
-        size += width
-    if current:
-        pieces.append("".join(current))
-
-    return "\r\n".join(p if i == 0 else " " + p for i, p in enumerate(pieces))
-
-
-# ---------------------------------------------------------------------------
-# Naming
-# ---------------------------------------------------------------------------
-
-def display_name(league, feed_name, seen):
-    if not feed_name:
-        return None
-    seen.add(feed_name)
-    return league.get("names", {}).get(feed_name, feed_name)
-
-
-def team_label(league, name):
-    gender = league.get("gender", "M")
-    if not league.get("international"):
-        return "%s (%s)" % (name, gender)
-
-    flag = cfg.COUNTRY_FLAGS.get(name, "")
-    if not flag:
-        note("MISSING FLAG for country: %s" % name)
-    if name == "Australia":
-        nickname = cfg.AUS_NICKNAMES.get((league["sport"], gender))
-        if nickname:
-            return "%s%s (%s)" % (flag, name, nickname)
-    return "%s%s (%s)" % (flag, name, gender)
-
-
-def round_label(row):
-    group = row.get("group")
-    if group and str(group).strip():
-        return str(group).strip()
-    number = row.get("roundnumber", row.get("round"))
-    if number in (None, ""):
-        return ""
-    text = str(number).strip()
-    return text if not text.isdigit() else "Round %s" % text
-
-
-def extra_time_suffix(league, row):
-    """Extra time markers are not in the fixture feed yet. When a phase two
-    source supplies one, it arrives as row['extratime'] holding a key such as
-    'aet', 'ot', '2ot', 'gp', 'so'."""
-    key = str(row.get("extratime", "") or "").strip().lower()
-    if not key:
-        return ""
-    table = cfg.EXTRA_TIME.get(league["sport"], {})
-    return table.get(key, key.upper())
-
-
-# ---------------------------------------------------------------------------
-# Event assembly
-# ---------------------------------------------------------------------------
-
-def make_event(uid, title, start, minutes, location, notes):
-    end = start + dt.timedelta(minutes=minutes)
-    lines = [
-        "BEGIN:VEVENT",
-        "UID:%s" % uid,
-        "DTSTAMP:%s" % stamp(dt.datetime.now(dt.timezone.utc)),
-        "DTSTART:%s" % stamp(start),
-        "DTEND:%s" % stamp(end),
-        "SUMMARY:%s" % escape(title),
-    ]
-    if location:
-        lines.append("LOCATION:%s" % escape(location))
-    if notes:
-        lines.append("DESCRIPTION:%s" % escape(notes))
-    lines.append("TRANSP:TRANSPARENT")
-    lines.append("END:VEVENT")
-    return lines
-
-
-def build_league_events(league):
-    sport = cfg.SPORTS[league["sport"]]
-    slugs = league["slug"] if isinstance(league["slug"], list) else [league["slug"]]
-
-    rows, used_url = None, None
-    for slug in slugs:
-        rows, used_url = load_feed(slug)
-        if rows:
-            break
-    if not rows:
-        return []
-
-    note("FEED OK %s via %s (%d rows, columns: %s)"
-         % (slugs[0], used_url, len(rows), ", ".join(sorted(rows[0].keys()))))
-
-    follow = set(league.get("follow") or [])
-    seen_names = set()
-    events = []
-    count = 0
-
-    for index, row in enumerate(rows):
-        home_feed = row.get("hometeam") or row.get("home")
-        away_feed = row.get("awayteam") or row.get("away")
-        for value in (home_feed, away_feed):
-            if value:
-                seen_names.add(value)
-        if follow and home_feed not in follow and away_feed not in follow:
-            continue
-
-        home = display_name(league, home_feed, seen_names)
-        away = display_name(league, away_feed, seen_names)
-        if not home or not away:
-            continue
-
-        start = parse_utc(row.get("dateutc") or row.get("date"))
-        if start is None:
-            continue
-
-        home_label = team_label(league, home)
-        away_label = team_label(league, away)
-
-        if cfg.INCLUDE_SCORES:
-            home_score, away_score = parse_scores(row)
-            if home_score is not None:
-                home_label += " [%s]" % home_score
-                away_label += " [%s]" % away_score
-
-        if sport["format"] == "@":
-            title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
-        else:
-            title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
-
-        suffix = extra_time_suffix(league, row) if cfg.INCLUDE_SCORES else ""
-        if suffix:
-            title += " " + suffix
-
-        stage = league.get("stage", "").replace("{round}", round_label(row))
-        stage = stage.rstrip(", ").strip()
-        notes = "\n".join(x for x in (league.get("competition"), stage) if x)
-
-        number = row.get("matchnumber", index)
-        uid = "%s-%s@sports-calendar" % (slugs[0], number)
-
-        events.extend(make_event(uid, title, start, sport["minutes"],
-                                 row.get("location"), notes))
-        count += 1
-
-    unmapped = sorted(n for n in seen_names if n not in league.get("names", {}))
-    if unmapped:
-        diagnostics.append("FEED NAMES %s: %s" % (slugs[0], " | ".join(unmapped)))
-    print("  %s: %d events kept" % (slugs[0], count))
-    return events
-
-
-def build_f1_events():
-    sport = cfg.SPORTS["f1"]
-    try:
-        payload = fetch_json(JOLPICA_URL.format(year=cfg.F1_SEASON))
-    except Exception as err:  # noqa: BLE001
-        note("SKIPPED Formula 1: %s" % err)
-        return []
-
-    races = payload["MRData"]["RaceTable"]["Races"]
-    events = []
-    count = 0
-
-    for race in races:
-        grand_prix = race.get("raceName", "Grand Prix")
-        circuit = race.get("Circuit", {}).get("circuitName", "")
-        round_no = race.get("round", "")
-
-        for key, (label, minutes) in cfg.F1_SESSIONS.items():
-            if key == "Race":
-                block = {"date": race.get("date"), "time": race.get("time")}
-            else:
-                block = race.get(key)
-            if not block:
-                continue
-            if label.startswith("Practice") and not cfg.F1_INCLUDE_PRACTICE:
-                continue
-            start = parse_iso_date_time(block.get("date"), block.get("time"))
-            if not start:
-                continue
-            title = "%s F1: %s (%s)" % (sport["emoji"], label, grand_prix)
-            notes = "%s\nRound %s" % (cfg.F1_COMPETITION, round_no)
-            uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no, key)
-            events.extend(make_event(uid, title, start, minutes, circuit, notes))
-            count += 1
-
-    print("  formula-1: %d sessions" % count)
-    return events
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main():
-    print("Building calendar...")
-    body = []
-    for league in cfg.LEAGUES:
-        body.extend(build_league_events(league))
-    body.extend(build_f1_events())
-
-    count = len([1 for line in body if line == "BEGIN:VEVENT"])
-    note("TOTAL events written: %d" % count)
-    if count == 0:
-        note("ERROR no events produced, refusing to overwrite the calendar")
-        write_diagnostics()
-        return 1
-
-    header = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//sports-calendar//EN",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        "X-WR-CALNAME:%s" % escape(cfg.CALENDAR_NAME),
-        "X-WR-TIMEZONE:UTC",
-    ]
-    lines = header + body + ["END:VCALENDAR"]
-
-    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(cfg.OUTPUT_DIR, cfg.OUTPUT_FILE)
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write("\r\n".join(fold(line) for line in lines) + "\r\n")
-
-    print("Wrote %s with %d events" % (path, count))
-    write_diagnostics()
-    return 0
-
-
-def write_diagnostics():
-    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(cfg.OUTPUT_DIR, "diagnostics.txt")
-    header = "Run at %s UTC" % dt.datetime.now(
-        dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(header + "\n\n")
-        handle.write("\n".join(diagnostics) if diagnostics else "Nothing to report.")
-        handle.write("\n")
-    print("Wrote %s" % path)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+CALENDAR_NAME = "Sport"
+OUTPUT_DIR = "docs"
+OUTPUT_FILE = "calendar.ics"
+
+# Phase 1 is spoiler-safe: no scores anywhere. Phase 2 flips this on once the
+# unlock page exists.
+INCLUDE_SCORES = False
