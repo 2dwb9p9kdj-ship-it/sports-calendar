@@ -287,12 +287,6 @@ EXTRA_TIME = {
 # come straight from the leagues instead. If one of these ever fails, the
 # generator falls back to the fixturedownload slug named in "fallback".
 OFFICIAL_SOURCES = [
-    {"source": "nba", "sport": "basketball_us", "gender": "M",
-     "team": "Denver Nuggets", "season": "2026-27",
-     "competition": "National Basketball Association",
-     "fallback": {"slug": "nba-2026", "follow": ["Denver Nuggets"],
-                  "stage": "2026/27 Regular Season"}},
-
     {"source": "nhl", "sport": "ice_hockey", "gender": "M",
      "team": "Colorado Avalanche", "team_code": "COL", "season": "20262027",
      "competition": "National Hockey League",
@@ -318,41 +312,55 @@ NHL_STAGES = {1: "2026/27 Preseason", 2: "2026/27 Regular Season",
 # fixtur.es writes titles as "Home - Away [TAG] (1-2)".
 # Set "only_tags": None to take every fixture in the feed.
 ICS_SOURCES = [
-    {"url": "https://ics.fixtur.es/v2/chelsea.ics",
+    # Chelsea men: cups only, everything else comes from fixturedownload.
+    {"name": "Chelsea men", "url": "https://ics.fixtur.es/v2/chelsea.ics",
      "sport": "football", "gender": "M", "team": "Chelsea",
      "only_tags": ["FA", "LC"],
      "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"}},
 
-    {"url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/258661.ics",
+    # Chelsea women: this feed carries no competition tag, so everything is
+    # taken and the de-duplicator drops anything already in the calendar.
+    {"name": "Chelsea women",
+     "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/258661.ics",
      "sport": "football", "gender": "W", "team": "Chelsea",
-     "only_tags": ["FA", "LC", "CL"],
-     "tag_names": {"FA": "Women's FA Cup", "LC": "Women's League Cup",
-                   "CL": "UEFA Women's Champions League"}},
+     "only_tags": None, "competition": "Chelsea Women fixture",
+     "strip_suffix": [" starting in 15 minutes"]},
 
-    # --- Probe only -------------------------------------------------------
-    # "probe": True means read the feed and describe it in diagnostics.txt
-    # without adding anything to the calendar. Once we know what each one
-    # holds, the useful ones get a proper entry above and the rest are deleted.
-    {"probe": True, "name": "Football Australia",
-     "url": "https://ics.ecal.com/ecal-sub/69219a2b0a1af200082b4a47/Football%20Australia.ics"},
-    {"probe": True, "name": "FotMob team 6716",
-     "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/6716.ics"},
-    {"probe": True, "name": "Denver Broncos",
-     "url": "https://www.denverbroncos.com/api/addToCalendar/ag/s?text="},
-    {"probe": True, "name": "NBL",
-     "url": "https://ics.ecal.com/ecal-sub/62539a67bfdcac000eaf5602/NBL.ics"},
-    {"probe": True, "name": "Perth Scorchers",
-     "url": "https://ics.ecal.com/ecal-sub/61e112c2e91106000fceda9a/Perth%20Scorchers.ics"},
-    {"probe": True, "name": "NRL",
-     "url": "https://ics.ecal.com/ecal-sub/67ad65e9a8d02e0008d1180e/National%20Rugby%20League.ics"},
-    {"probe": True, "name": "NBA",
-     "url": "https://ics.ecal.com/ecal-sub/68e381838a5ca700082bcb5c/NBA.ics"},
-    {"probe": True, "name": "NHL",
-     "url": "https://ics.ecal.com/ecal-sub/68e382408a5ca700082bcb68/NHL.ics"},
-    {"probe": True, "name": "MLB",
-     "url": "https://ics.ecal.com/ecal-sub/68e383d68a5ca700082bcb7f/MLB%20.ics"},
-    {"probe": True, "name": "Formula 1",
-     "url": "https://files-f1.motorsportcalendars.com/f1-calendar_qualifying_sprint_gp.ics"},
+    # Socceroos.
+    {"name": "Socceroos",
+     "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/6716.ics",
+     "sport": "football", "gender": "M", "team": "Australia",
+     "international": True, "only_tags": None,
+     "competition": "Australia International",
+     "strip_suffix": [" starting in 15 minutes"]},
+
+    # Matildas.
+    {"name": "Football Australia",
+     "url": "https://ics.ecal.com/ecal-sub/69219a2b0a1af200082b4a47/Football%20Australia.ics",
+     "sport": "football", "gender": "W", "team": "Australia",
+     "international": True, "only_tags": None,
+     "competition": "Australia International",
+     "skip_if_contains": ["Ticket Alert", "\U0001f3ab"],
+     "names": {"Matildas": "Australia", "Australia Women": "Australia",
+               "Colombia Women": "Colombia", "Germany Women": "Germany",
+               "Haiti Women": "Haiti", "England Women": "England",
+               "Japan Women": "Japan", "China PR Women": "China",
+               "New Zealand Women": "New Zealand", "USA Women": "United States"}},
+
+    # Denver Broncos: this one carries preseason, fixturedownload does not.
+    {"name": "Denver Broncos",
+     "url": "https://www.denverbroncos.com/api/addToCalendar/ag/s?text=",
+     "sport": "american_football", "gender": "M", "team": "Denver Broncos",
+     "only_tags": None, "away_first": True,
+     "competition": "National Football League"},
+
+    # NBA: replaces the league's own feed, which blocks GitHub. Carries
+    # preseason and venues.
+    {"name": "NBA",
+     "url": "https://ics.ecal.com/ecal-sub/68e381838a5ca700082bcb5c/NBA.ics",
+     "sport": "basketball_us", "gender": "M", "team": "Denver Nuggets",
+     "only_tags": None, "away_first": True,
+     "competition": "National Basketball Association"},
 ]
 
 # Ignore anything in those feeds before this date, otherwise a decade of old
