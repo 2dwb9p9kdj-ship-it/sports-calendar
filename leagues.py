@@ -127,11 +127,6 @@ LEAGUES = [
      "competition": "Super Rugby Pacific", "stage": "2026 Season, {round}"},
 
     # ---- Basketball --------------------------------------------------------
-    {"slug": "nba-2026", "sport": "basketball_us", "gender": "M",
-     "follow": ["Denver Nuggets"], "names": {},
-     "competition": "National Basketball Association",
-     "stage": "2026/27 Regular Season"},
-
     {"slug": "nbl-2026", "sport": "basketball_au", "gender": "M",
      "follow": ["Perth Wildcats", "Perth"], "names": {"Perth": "Perth Wildcats"},
      "competition": "National Basketball League", "stage": "2026/27 Season, {round}"},
@@ -145,10 +140,6 @@ LEAGUES = [
     {"slug": "mlb-2026", "sport": "baseball", "gender": "M",
      "follow": ["Colorado Rockies"], "names": {},
      "competition": "Major League Baseball", "stage": "2026 Regular Season"},
-
-    {"slug": "nhl-2026", "sport": "ice_hockey", "gender": "M",
-     "follow": ["Colorado Avalanche"], "names": {},
-     "competition": "National Hockey League", "stage": "2026/27 Regular Season"},
 
     {"slug": "nfl-2026", "sport": "american_football", "gender": "M",
      "follow": ["Denver Broncos"], "names": {},
@@ -286,6 +277,107 @@ EXTRA_TIME = {
     "cricket_odi":       {"so": "S/O"},
     "cricket_test":      {},
 }
+
+
+
+# ---------------------------------------------------------------------------
+# Official league feeds (free, no key) that carry preseason and playoffs
+# ---------------------------------------------------------------------------
+# fixturedownload publishes regular season and finals only, so the NBA and NHL
+# come straight from the leagues instead. If one of these ever fails, the
+# generator falls back to the fixturedownload slug named in "fallback".
+OFFICIAL_SOURCES = [
+    {"source": "nba", "sport": "basketball_us", "gender": "M",
+     "team": "Denver Nuggets", "season": "2026-27",
+     "competition": "National Basketball Association",
+     "fallback": {"slug": "nba-2026", "follow": ["Denver Nuggets"],
+                  "stage": "2026/27 Regular Season"}},
+
+    {"source": "nhl", "sport": "ice_hockey", "gender": "M",
+     "team": "Colorado Avalanche", "team_code": "COL", "season": "20262027",
+     "competition": "National Hockey League",
+     "fallback": {"slug": "nhl-2026", "follow": ["Colorado Avalanche"],
+                  "stage": "2026/27 Regular Season"}},
+]
+
+# Stage wording per game type
+NBA_STAGES = {"1": "2026/27 Preseason", "2": "2026/27 Regular Season",
+              "3": "2027 All-Star", "4": "2027 Playoffs", "5": "2027 Play-In"}
+NHL_STAGES = {1: "2026/27 Preseason", 2: "2026/27 Regular Season",
+              3: "2027 Stanley Cup Playoffs"}
+
+
+# ---------------------------------------------------------------------------
+# Published team calendars (.ics feeds), free and keyless
+# ---------------------------------------------------------------------------
+# Used only for competitions the main feeds do not carry, such as the FA Cup,
+# the League Cup and the Women's Champions League. "only_tags" is what keeps
+# these from duplicating fixtures we already get elsewhere: a fixture is kept
+# only if its tag is listed here.
+#
+# fixtur.es writes titles as "Home - Away [TAG] (1-2)".
+# Set "only_tags": None to take every fixture in the feed.
+ICS_SOURCES = [
+    {"url": "https://ics.fixtur.es/v2/chelsea.ics",
+     "sport": "football", "gender": "M", "team": "Chelsea",
+     "only_tags": ["FA", "LC"],
+     "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"}},
+
+    {"url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/258661.ics",
+     "sport": "football", "gender": "W", "team": "Chelsea",
+     "only_tags": ["FA", "LC", "CL"],
+     "tag_names": {"FA": "Women's FA Cup", "LC": "Women's League Cup",
+                   "CL": "UEFA Women's Champions League"}},
+
+    # --- Probe only -------------------------------------------------------
+    # "probe": True means read the feed and describe it in diagnostics.txt
+    # without adding anything to the calendar. Once we know what each one
+    # holds, the useful ones get a proper entry above and the rest are deleted.
+    {"probe": True, "name": "Football Australia",
+     "url": "https://ics.ecal.com/ecal-sub/69219a2b0a1af200082b4a47/Football%20Australia.ics"},
+    {"probe": True, "name": "FotMob team 6716",
+     "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/6716.ics"},
+    {"probe": True, "name": "Denver Broncos",
+     "url": "https://www.denverbroncos.com/api/addToCalendar/ag/s?text="},
+    {"probe": True, "name": "NBL",
+     "url": "https://ics.ecal.com/ecal-sub/62539a67bfdcac000eaf5602/NBL.ics"},
+    {"probe": True, "name": "Perth Scorchers",
+     "url": "https://ics.ecal.com/ecal-sub/61e112c2e91106000fceda9a/Perth%20Scorchers.ics"},
+    {"probe": True, "name": "NRL",
+     "url": "https://ics.ecal.com/ecal-sub/67ad65e9a8d02e0008d1180e/National%20Rugby%20League.ics"},
+    {"probe": True, "name": "NBA",
+     "url": "https://ics.ecal.com/ecal-sub/68e381838a5ca700082bcb5c/NBA.ics"},
+    {"probe": True, "name": "NHL",
+     "url": "https://ics.ecal.com/ecal-sub/68e382408a5ca700082bcb68/NHL.ics"},
+    {"probe": True, "name": "MLB",
+     "url": "https://ics.ecal.com/ecal-sub/68e383d68a5ca700082bcb7f/MLB%20.ics"},
+    {"probe": True, "name": "Formula 1",
+     "url": "https://files-f1.motorsportcalendars.com/f1-calendar_qualifying_sprint_gp.ics"},
+]
+
+# Ignore anything in those feeds before this date, otherwise a decade of old
+# fixtures lands in the calendar.
+ICS_EARLIEST = "2026-07-01"
+
+# ---------------------------------------------------------------------------
+# Hand-entered fixtures
+# ---------------------------------------------------------------------------
+# For competitions with no free data feed: FA Cup, EFL Cup (League Cup), the
+# Women's Champions League, and anything else that has to be typed in.
+#
+# "start" is in UTC, written as "YYYY-MM-DD HH:MM". To convert from Perth
+# time, subtract 8 hours. From UK summer time, subtract 1 hour.
+# Set "international": True to get country flags instead of (M) / (W).
+#
+# Add a line by copying an existing one. A trailing comma on every line is
+# required, and the indentation must match.
+MANUAL_FIXTURES = [
+    # Empty on purpose. Example of the shape, copy and uncomment to use:
+    # {"sport": "football", "gender": "M",
+    #  "home": "Chelsea", "away": "Leeds United",
+    #  "start": "2026-09-09 18:45", "location": "Stamford Bridge",
+    #  "competition": "EFL Cup", "stage": "2026/27 Third Round"},
+]
 
 # ---------------------------------------------------------------------------
 # Output
