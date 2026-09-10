@@ -556,6 +556,23 @@ def _strip_symbols(text):
 
 SEPARATORS = (" - ", " vs. ", " vs ", " Vs ", " v ", " V ", " @ ", " at ")
 
+GENDER_MARKERS = (" (W)", " (M)", " (w)", " (m)", " Women", " Men",
+                  " women", " men", " WFC", " Ladies")
+
+
+def _clean_team(name):
+    """Feeds often append their own gender marker. Ours is added later, so
+    'Chelsea (W)' must become 'Chelsea' or the title reads 'Chelsea (W) (W)'."""
+    text = name.strip()
+    changed = True
+    while changed:
+        changed = False
+        for marker in GENDER_MARKERS:
+            if text.endswith(marker) and len(text) > len(marker):
+                text = text[: -len(marker)].strip()
+                changed = True
+    return text
+
 
 def _split_summary(summary, source=None):
     """Turn a feed title into (first, second, tag, score).
@@ -589,8 +606,8 @@ def _split_summary(summary, source=None):
     for splitter in SEPARATORS:
         if splitter in text:
             first, _, second = text.partition(splitter)
-            first = _strip_symbols(first)
-            second = _strip_symbols(second)
+            first = _clean_team(_strip_symbols(first))
+            second = _clean_team(_strip_symbols(second))
             if first and second:
                 return first, second, tag, score
     return None, None, tag, score
@@ -738,6 +755,8 @@ def build_ics_events():
                     "ics-%s@sports-calendar" % (uid or start.isoformat()),
                     title, start, sport["minutes"], location, competition))
                 kept += 1
+                if kept <= 3:
+                    note("ICS %s sample: %s" % (source.get("name", "?"), title))
 
         note("ICS %s: kept %d, %d duplicates dropped, %d filtered out, "
              "%d unreadable | tags: %s"
