@@ -13,7 +13,9 @@ Out:  docs/calendar.ics  and  docs/diagnostics.txt
 Nothing here needs an API key, an account or a payment method.
 """
 
+import csv
 import datetime as dt
+import io
 import json
 import os
 import sys
@@ -22,9 +24,15 @@ import urllib.request
 
 import leagues as cfg
 
-FD_URL = "https://fixturedownload.com/view/json/{slug}"
+# Tried in order until one returns something we can read.
+FD_URLS = [
+    "https://fixturedownload.com/download/json/{slug}",
+    "https://fixturedownload.com/feed/json/{slug}",
+    "https://fixturedownload.com/view/json/{slug}",
+    "https://fixturedownload.com/download/csv/{slug}",
+]
 JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}.json?limit=100"
-USER_AGENT = "sports-calendar/1.0 (personal calendar generator)"
+USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
 
 diagnostics = []
@@ -36,22 +44,92 @@ def note(line):
     print(line)
 
 
-def fetch_json(url):
+def fetch_text(url):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        return resp.read().decode("utf-8-sig", errors="replace")
+
+
+def fetch_json(url):
+    return json.loads(fetch_text(url))
+
+
+# ---------------------------------------------------------------------------
+# Reading the fixture feeds
+# ---------------------------------------------------------------------------
+
+def tidy_key(name):
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def rows_from_csv(text):
+    reader = csv.DictReader(io.StringIO(text))
+    rows = []
+    for raw in reader:
+        rows.append({tidy_key(k): (v or "").strip()
+                     for k, v in raw.items() if k})
+    return rows
+
+
+def rows_from_json(text):
+    payload = json.loads(text)
+    if isinstance(payload, dict):
+        for key in ("matches", "fixtures", "data", "results"):
+            if isinstance(payload.get(key), list):
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        raise ValueError("JSON was not a list of matches")
+    return [{tidy_key(k): v for k, v in row.items()} for row in payload]
+
+
+def load_feed(slug):
+    """Return (rows, url_that_worked) or (None, None)."""
+    last_error = None
+    for template in FD_URLS:
+        url = template.format(slug=slug)
+        try:
+            text = fetch_text(url)
+        except urllib.error.HTTPError as err:
+            last_error = "HTTP %s" % err.code
+            continue
+        except Exception as err:  # noqa: BLE001
+            last_error = str(err)
+            continue
+
+        for parser in (rows_from_json, rows_from_csv):
+            try:
+                rows = parser(text)
+            except Exception as err:  # noqa: BLE001
+                last_error = str(err)
+                continue
+            if rows and any(rows[0].get(k) for k in ("hometeam", "home")):
+                return rows, url
+            last_error = "parsed but found no team columns"
+
+    note("SKIPPED %s: no readable feed (%s)" % (slug, last_error))
+    return None, None
 
 
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
 
+DATE_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+)
+
+
 def parse_utc(value):
-    """fixturedownload writes '2026-03-01 02:15:00Z'. Return an aware datetime."""
     if not value:
         return None
-    text = str(value).strip().replace("Z", "").replace("T", " ")
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+    text = str(value).strip().replace("Z", "").replace("T", " ").strip()
+    for fmt in DATE_FORMATS:
         try:
             return dt.datetime.strptime(text, fmt).replace(tzinfo=dt.timezone.utc)
         except ValueError:
@@ -73,29 +151,40 @@ def parse_iso_date_time(date_text, time_text):
         return None
 
 
+def parse_scores(row):
+    """Scores arrive either as two columns or as one 'Result' string."""
+    home = row.get("hometeamscore", row.get("homescore"))
+    away = row.get("awayteamscore", row.get("awayscore"))
+    if home not in (None, "") and away not in (None, ""):
+        return home, away
+    result = str(row.get("result", "") or "").strip()
+    if "-" in result:
+        left, _, right = result.partition("-")
+        left, right = left.strip(), right.strip()
+        if left.isdigit() and right.isdigit():
+            return left, right
+    return None, None
+
+
 def stamp(moment):
     return moment.strftime("%Y%m%dT%H%M%SZ")
 
 
 def escape(text):
-    """iCalendar escaping: backslash, semicolon, comma, newline."""
     if text is None:
         return ""
     return (str(text).replace("\\", "\\\\").replace(";", "\\;")
-            .replace(",", "\\,").replace("\r\n", "\\n")
-            .replace("\n", "\\n"))
+            .replace(",", "\\,").replace("\r\n", "\\n").replace("\n", "\\n"))
 
 
 def _joins_to_previous(char):
-    """True if breaking a line immediately before this character would break
-    an emoji sequence such as a flag, a skin tone or a joined pictograph."""
+    """True if breaking a line before this character would break an emoji."""
     code = ord(char)
-    return (code == 0x200D                       # zero width joiner
-            or code == 0xFE0F                    # variation selector
-            or 0x1F3FB <= code <= 0x1F3FF        # skin tone modifiers
-            or 0x1F1E6 <= code <= 0x1F1FF        # regional indicators (flags)
-            or 0xE0000 <= code <= 0xE007F        # tag characters (sub-flags)
-            or 0x0300 <= code <= 0x036F)         # combining marks
+    return (code == 0x200D or code == 0xFE0F
+            or 0x1F3FB <= code <= 0x1F3FF
+            or 0x1F1E6 <= code <= 0x1F1FF
+            or 0xE0000 <= code <= 0xE007F
+            or 0x0300 <= code <= 0x036F)
 
 
 def fold(line):
@@ -103,7 +192,6 @@ def fold(line):
     if len(line.encode("utf-8")) <= 73:
         return line
 
-    # Group the text into clusters that must never be split apart.
     clusters, cluster = [], ""
     for char in line:
         if cluster and _joins_to_previous(char):
@@ -120,7 +208,7 @@ def fold(line):
         width = len(item.encode("utf-8"))
         if current and size + width > 73:
             pieces.append("".join(current))
-            current, size = [], 1  # the continuation space costs one octet
+            current, size = [], 1
         current.append(item)
         size += width
     if current:
@@ -141,7 +229,6 @@ def display_name(league, feed_name, seen):
 
 
 def team_label(league, name):
-    """Chelsea (M)   or   flagAustralia (Matildas) for internationals."""
     gender = league.get("gender", "M")
     if not league.get("international"):
         return "%s (%s)" % (name, gender)
@@ -156,16 +243,26 @@ def team_label(league, name):
     return "%s%s (%s)" % (flag, name, gender)
 
 
-def round_label(match):
-    """Prefer a named stage from the feed, fall back to 'Round N'."""
-    group = match.get("Group") or match.get("group")
+def round_label(row):
+    group = row.get("group")
     if group and str(group).strip():
         return str(group).strip()
-    number = match.get("RoundNumber", match.get("roundNumber"))
+    number = row.get("roundnumber", row.get("round"))
     if number in (None, ""):
         return ""
     text = str(number).strip()
     return text if not text.isdigit() else "Round %s" % text
+
+
+def extra_time_suffix(league, row):
+    """Extra time markers are not in the fixture feed yet. When a phase two
+    source supplies one, it arrives as row['extratime'] holding a key such as
+    'aet', 'ot', '2ot', 'gp', 'so'."""
+    key = str(row.get("extratime", "") or "").strip().lower()
+    if not key:
+        return ""
+    table = cfg.EXTRA_TIME.get(league["sport"], {})
+    return table.get(key, key.upper())
 
 
 # ---------------------------------------------------------------------------
@@ -193,27 +290,31 @@ def make_event(uid, title, start, minutes, location, notes):
 
 def build_league_events(league):
     sport = cfg.SPORTS[league["sport"]]
-    url = FD_URL.format(slug=league["slug"])
-    try:
-        matches = fetch_json(url)
-    except urllib.error.HTTPError as err:
-        note("SKIPPED %s: feed returned HTTP %s (season may not be published yet)"
-             % (league["slug"], err.code))
+    slugs = league["slug"] if isinstance(league["slug"], list) else [league["slug"]]
+
+    rows, used_url = None, None
+    for slug in slugs:
+        rows, used_url = load_feed(slug)
+        if rows:
+            break
+    if not rows:
         return []
-    except Exception as err:  # noqa: BLE001 - a bad feed must not stop the run
-        note("SKIPPED %s: %s" % (league["slug"], err))
-        return []
+
+    note("FEED OK %s via %s (%d rows, columns: %s)"
+         % (slugs[0], used_url, len(rows), ", ".join(sorted(rows[0].keys()))))
 
     follow = set(league.get("follow") or [])
     seen_names = set()
     events = []
+    count = 0
 
-    for match in matches:
-        home_feed = match.get("HomeTeam") or match.get("homeTeam")
-        away_feed = match.get("AwayTeam") or match.get("awayTeam")
+    for index, row in enumerate(rows):
+        home_feed = row.get("hometeam") or row.get("home")
+        away_feed = row.get("awayteam") or row.get("away")
+        for value in (home_feed, away_feed):
+            if value:
+                seen_names.add(value)
         if follow and home_feed not in follow and away_feed not in follow:
-            # still record the name so diagnostics can show the real spellings
-            seen_names.update(x for x in (home_feed, away_feed) if x)
             continue
 
         home = display_name(league, home_feed, seen_names)
@@ -221,7 +322,7 @@ def build_league_events(league):
         if not home or not away:
             continue
 
-        start = parse_utc(match.get("DateUtc") or match.get("dateUtc"))
+        start = parse_utc(row.get("dateutc") or row.get("date"))
         if start is None:
             continue
 
@@ -229,9 +330,8 @@ def build_league_events(league):
         away_label = team_label(league, away)
 
         if cfg.INCLUDE_SCORES:
-            home_score = match.get("HomeTeamScore")
-            away_score = match.get("AwayTeamScore")
-            if home_score is not None and away_score is not None:
+            home_score, away_score = parse_scores(row)
+            if home_score is not None:
                 home_label += " [%s]" % home_score
                 away_label += " [%s]" % away_score
 
@@ -240,24 +340,25 @@ def build_league_events(league):
         else:
             title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
 
-        stage = league.get("stage", "").replace("{round}", round_label(match))
+        suffix = extra_time_suffix(league, row) if cfg.INCLUDE_SCORES else ""
+        if suffix:
+            title += " " + suffix
+
+        stage = league.get("stage", "").replace("{round}", round_label(row))
         stage = stage.rstrip(", ").strip()
         notes = "\n".join(x for x in (league.get("competition"), stage) if x)
 
-        number = match.get("MatchNumber", match.get("matchNumber", len(events)))
-        uid = "%s-%s@sports-calendar" % (league["slug"], number)
+        number = row.get("matchnumber", index)
+        uid = "%s-%s@sports-calendar" % (slugs[0], number)
 
-        events.extend(make_event(
-            uid, title, start, sport["minutes"],
-            match.get("Location") or match.get("location"), notes))
+        events.extend(make_event(uid, title, start, sport["minutes"],
+                                 row.get("location"), notes))
+        count += 1
 
-    if seen_names:
-        unmapped = sorted(n for n in seen_names
-                          if n not in league.get("names", {}))
-        diagnostics.append("FEED NAMES %s: %s" % (league["slug"],
-                                                  ", ".join(unmapped)))
-    print("  %s: %d events" % (league["slug"], len([1 for l in events
-                                                    if l == "BEGIN:VEVENT"])))
+    unmapped = sorted(n for n in seen_names if n not in league.get("names", {}))
+    if unmapped:
+        diagnostics.append("FEED NAMES %s: %s" % (slugs[0], " | ".join(unmapped)))
+    print("  %s: %d events kept" % (slugs[0], count))
     return events
 
 
@@ -271,13 +372,13 @@ def build_f1_events():
 
     races = payload["MRData"]["RaceTable"]["Races"]
     events = []
+    count = 0
 
     for race in races:
         grand_prix = race.get("raceName", "Grand Prix")
         circuit = race.get("Circuit", {}).get("circuitName", "")
         round_no = race.get("round", "")
 
-        sessions = []
         for key, (label, minutes) in cfg.F1_SESSIONS.items():
             if key == "Race":
                 block = {"date": race.get("date"), "time": race.get("time")}
@@ -288,17 +389,15 @@ def build_f1_events():
             if label.startswith("Practice") and not cfg.F1_INCLUDE_PRACTICE:
                 continue
             start = parse_iso_date_time(block.get("date"), block.get("time"))
-            if start:
-                sessions.append((key, label, minutes, start))
-
-        for key, label, minutes, start in sessions:
+            if not start:
+                continue
             title = "%s F1: %s (%s)" % (sport["emoji"], label, grand_prix)
             notes = "%s\nRound %s" % (cfg.F1_COMPETITION, round_no)
             uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no, key)
             events.extend(make_event(uid, title, start, minutes, circuit, notes))
+            count += 1
 
-    print("  formula-1: %d sessions" % len([1 for l in events
-                                            if l == "BEGIN:VEVENT"]))
+    print("  formula-1: %d sessions" % count)
     return events
 
 
@@ -314,8 +413,9 @@ def main():
     body.extend(build_f1_events())
 
     count = len([1 for line in body if line == "BEGIN:VEVENT"])
+    note("TOTAL events written: %d" % count)
     if count == 0:
-        note("ERROR no events were produced, refusing to overwrite the calendar")
+        note("ERROR no events produced, refusing to overwrite the calendar")
         write_diagnostics()
         return 1
 
@@ -343,10 +443,10 @@ def main():
 def write_diagnostics():
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     path = os.path.join(cfg.OUTPUT_DIR, "diagnostics.txt")
-    stamp_line = "Run at %s UTC" % dt.datetime.now(
+    header = "Run at %s UTC" % dt.datetime.now(
         dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
     with open(path, "w", encoding="utf-8") as handle:
-        handle.write(stamp_line + "\n\n")
+        handle.write(header + "\n\n")
         handle.write("\n".join(diagnostics) if diagnostics else "Nothing to report.")
         handle.write("\n")
     print("Wrote %s" % path)
