@@ -38,6 +38,7 @@ USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
 
 diagnostics = []
+seen_events = set()
 
 
 def note(line):
@@ -273,6 +274,11 @@ def extra_time_suffix(league, row):
 # Event assembly
 # ---------------------------------------------------------------------------
 
+def event_key(start, home, away):
+    """Same two teams on the same day counts as the same match."""
+    return (start.date(), frozenset((home.strip(), away.strip())))
+
+
 def make_event(uid, title, start, minutes, location, notes):
     end = start + dt.timedelta(minutes=minutes)
     lines = [
@@ -352,6 +358,7 @@ def build_league_events(league):
         stage = stage.rstrip(", ").strip()
         notes = "\n".join(x for x in (league.get("competition"), stage) if x)
 
+        seen_events.add(event_key(start, home_label, away_label))
         number = row.get("matchnumber", index)
         uid = "%s-%s@sports-calendar" % (slugs[0], number)
 
@@ -397,6 +404,7 @@ def build_manual_events():
         else:
             title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
 
+        seen_events.add(event_key(start, home_label, away_label))
         notes = "\n".join(x for x in (entry.get("competition"),
                                       entry.get("stage")) if x)
         uid = "manual-%s-%s-%s@sports-calendar" % (
@@ -481,6 +489,8 @@ def build_nhl_events(entry):
         title = "%s %s @ %s" % (cfg.SPORTS[entry["sport"]]["emoji"],
                                 team_label(pseudo, away),
                                 team_label(pseudo, home))
+        seen_events.add(event_key(start, team_label(pseudo, home),
+                                  team_label(pseudo, away)))
         notes = "%s\n%s" % (entry["competition"], stage)
         events.extend(make_event("nhl-%s@sports-calendar" % game.get("id"), title,
                                  start, cfg.SPORTS[entry["sport"]]["minutes"],
@@ -531,12 +541,36 @@ def _unfold_ics(text):
     return lines
 
 
-def _split_summary(summary):
-    """'Home - Away [LC] (1-2)' -> (home, away, tag, score)."""
+def _strip_symbols(text):
+    """Remove flags, sport emoji and stray spaces the feeds put in titles."""
+    kept = []
+    for char in text:
+        code = ord(char)
+        if (0x1F1E6 <= code <= 0x1F1FF or 0x1F300 <= code <= 0x1FAFF
+                or 0xE0000 <= code <= 0xE007F or code in (0x200D, 0xFE0F)
+                or 0x2600 <= code <= 0x27BF):
+            continue
+        kept.append(char)
+    return " ".join("".join(kept).split())
+
+
+SEPARATORS = (" - ", " vs. ", " vs ", " Vs ", " v ", " V ", " @ ", " at ")
+
+
+def _split_summary(summary, source=None):
+    """Turn a feed title into (first, second, tag, score).
+
+    Handles 'Home - Away [LC] (1-2)', 'Away @ Home', 'Away at Home',
+    'Home v Away' and leading emoji or flags."""
+    source = source or {}
     text = summary.strip()
+
     for prefix in ("\u26a0\ufe0f Postponed:", "Postponed:"):
         if text.startswith(prefix):
             text = text[len(prefix):].strip()
+    for suffix in source.get("strip_suffix", []):
+        if text.endswith(suffix):
+            text = text[: -len(suffix)].strip()
 
     score = None
     if text.endswith(")") and "(" in text:
@@ -552,12 +586,14 @@ def _split_summary(summary):
         tag = tail[:-1].strip()
         text = head.strip()
 
-    for splitter in (" - ", " vs ", " v ", " @ "):
+    for splitter in SEPARATORS:
         if splitter in text:
-            home, _, away = text.partition(splitter)
-            return home.strip(), away.strip(), tag, score
+            first, _, second = text.partition(splitter)
+            first = _strip_symbols(first)
+            second = _strip_symbols(second)
+            if first and second:
+                return first, second, tag, score
     return None, None, tag, score
-
 
 
 def probe_ics(source, text):
@@ -625,14 +661,20 @@ def build_ics_events():
 
         sport = cfg.SPORTS[source["sport"]]
         only = source.get("only_tags")
-        kept, seen_tags, unparsed = 0, set(), 0
-        summary = start = uid = None
+        wanted = source.get("team", "").lower()
+        names = source.get("names", {})
+        skip_words = source.get("skip_if_contains", [])
+        kept = duplicates = skipped = unparsed = 0
+        seen_tags = set()
+        summary = start = uid = location = None
 
         for line in _unfold_ics(text):
             if line.startswith("BEGIN:VEVENT"):
-                summary = start = uid = None
+                summary = start = uid = location = None
             elif line.startswith("SUMMARY:"):
                 summary = line[8:]
+            elif line.startswith("LOCATION:"):
+                location = line[9:].replace("\\,", ",").strip()
             elif line.startswith("DTSTART"):
                 start = parse_utc(line.split(":", 1)[-1])
             elif line.startswith("UID:"):
@@ -642,35 +684,66 @@ def build_ics_events():
                     continue
                 if earliest and start < earliest:
                     continue
+                if any(word in summary for word in skip_words):
+                    skipped += 1
+                    continue
 
-                home, away, tag, score = _split_summary(summary)
-                if not home or not away:
+                first, second, tag, score = _split_summary(summary, source)
+                if not first or not second:
                     unparsed += 1
                     continue
                 seen_tags.add(tag or "(none)")
                 if only is not None and tag not in only:
                     continue
 
+                first = names.get(first, first)
+                second = names.get(second, second)
+                if wanted and wanted not in first.lower() \
+                        and wanted not in second.lower():
+                    continue
+
+                if source.get("away_first"):
+                    home, away = second, first
+                else:
+                    home, away = first, second
+
                 pseudo = {"gender": source["gender"], "sport": source["sport"],
-                          "international": False, "names": {}}
+                          "international": source.get("international", False),
+                          "names": {}}
                 home_label = team_label(pseudo, home)
                 away_label = team_label(pseudo, away)
-                if cfg.INCLUDE_SCORES and score:
-                    home_label += " [%s]" % score[0]
-                    away_label += " [%s]" % score[1]
 
-                title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
-                competition = source.get("tag_names", {}).get(tag, tag or "")
+                key = event_key(start, home_label, away_label)
+                if key in seen_events:
+                    duplicates += 1
+                    continue
+                seen_events.add(key)
+
+                if cfg.INCLUDE_SCORES and score:
+                    if source.get("away_first"):
+                        away_label += " [%s]" % score[0]
+                        home_label += " [%s]" % score[1]
+                    else:
+                        home_label += " [%s]" % score[0]
+                        away_label += " [%s]" % score[1]
+
+                if sport["format"] == "@":
+                    title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
+                else:
+                    title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
+
+                competition = source.get("tag_names", {}).get(
+                    tag, source.get("competition", tag or ""))
                 events.extend(make_event(
                     "ics-%s@sports-calendar" % (uid or start.isoformat()),
-                    title, start, sport["minutes"], None, competition))
+                    title, start, sport["minutes"], location, competition))
                 kept += 1
 
-        note("ICS %s: kept %d, tags seen: %s%s"
-             % (source["url"].rsplit("/", 1)[-1], kept,
-                ", ".join(sorted(seen_tags)) or "none",
-                ", %d unreadable titles" % unparsed if unparsed else ""))
-        print("  ics %s: %d events" % (source["team"], kept))
+        note("ICS %s: kept %d, %d duplicates dropped, %d filtered out, "
+             "%d unreadable | tags: %s"
+             % (source.get("name", "?"), kept, duplicates, skipped, unparsed,
+                ", ".join(sorted(seen_tags)) or "none"))
+        print("  ics %s: %d events" % (source.get("name", "?"), kept))
 
     return events
 
