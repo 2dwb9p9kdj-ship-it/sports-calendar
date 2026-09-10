@@ -31,6 +31,8 @@ FD_URLS = [
     "https://fixturedownload.com/view/json/{slug}",
     "https://fixturedownload.com/download/csv/{slug}",
 ]
+NBA_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+NHL_URL = "https://api-web.nhle.com/v1/club-schedule-season/{code}/{season}"
 JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}.json?limit=100"
 USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
@@ -117,6 +119,8 @@ def load_feed(slug):
 
 DATE_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
+    "%Y%m%d %H%M%S",
+    "%Y%m%d",
     "%Y-%m-%d %H:%M",
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y %H:%M",
@@ -362,6 +366,315 @@ def build_league_events(league):
     return events
 
 
+
+def build_manual_events():
+    """Fixtures typed into leagues.py by hand, for competitions with no feed."""
+    entries = getattr(cfg, "MANUAL_FIXTURES", [])
+    events = []
+    for index, entry in enumerate(entries):
+        sport = cfg.SPORTS.get(entry.get("sport"))
+        if not sport:
+            note("MANUAL row %d: unknown sport %r" % (index + 1, entry.get("sport")))
+            continue
+        start = parse_utc(entry.get("start"))
+        if start is None:
+            note("MANUAL row %d: unreadable start %r" % (index + 1, entry.get("start")))
+            continue
+
+        pseudo = {"gender": entry.get("gender", "M"),
+                  "international": entry.get("international", False),
+                  "sport": entry["sport"], "names": {}}
+        home_label = team_label(pseudo, entry["home"])
+        away_label = team_label(pseudo, entry["away"])
+
+        if cfg.INCLUDE_SCORES and entry.get("score"):
+            home_score, away_score = entry["score"]
+            home_label += " [%s]" % home_score
+            away_label += " [%s]" % away_score
+
+        if sport["format"] == "@":
+            title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
+        else:
+            title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
+
+        notes = "\n".join(x for x in (entry.get("competition"),
+                                      entry.get("stage")) if x)
+        uid = "manual-%s-%s-%s@sports-calendar" % (
+            entry["start"].replace(" ", "").replace(":", "").replace("-", ""),
+            entry["home"].replace(" ", ""), entry["away"].replace(" ", ""))
+
+        events.extend(make_event(uid, title, start,
+                                 entry.get("minutes", sport["minutes"]),
+                                 entry.get("location"), notes))
+
+    print("  hand-entered: %d events" % len(entries))
+    return events
+
+
+
+def _name_from(block, *keys):
+    """League feeds nest names differently. Try each shape and take the first."""
+    parts = []
+    for key in keys:
+        value = block.get(key)
+        if isinstance(value, dict):
+            value = value.get("default")
+        if value:
+            parts.append(str(value).strip())
+    return " ".join(parts).strip()
+
+
+def build_nba_events(entry):
+    payload = fetch_json(NBA_URL)
+    dates = payload["leagueSchedule"]["gameDates"]
+    wanted = entry["team"].lower()
+    events, count = [], 0
+
+    for day in dates:
+        for game in day.get("games", []):
+            home = _name_from(game.get("homeTeam", {}), "teamCity", "teamName")
+            away = _name_from(game.get("awayTeam", {}), "teamCity", "teamName")
+            if wanted not in home.lower() and wanted not in away.lower():
+                continue
+            start = parse_utc(str(game.get("gameDateTimeUTC", "")).replace("T", " "))
+            if start is None:
+                continue
+
+            game_id = str(game.get("gameId", ""))
+            stage = cfg.NBA_STAGES.get(game_id[2:3], "2026/27 Season")
+            label = (game.get("gameLabel") or "").strip()
+            if label:
+                stage = "%s, %s" % (stage, label)
+
+            pseudo = {"gender": entry["gender"], "sport": entry["sport"], "names": {}}
+            title = "%s %s @ %s" % (cfg.SPORTS[entry["sport"]]["emoji"],
+                                    team_label(pseudo, away),
+                                    team_label(pseudo, home))
+            notes = "%s\n%s" % (entry["competition"], stage)
+            events.extend(make_event("nba-%s@sports-calendar" % game_id, title,
+                                     start, cfg.SPORTS[entry["sport"]]["minutes"],
+                                     game.get("arenaName"), notes))
+            count += 1
+    return events, count
+
+
+def build_nhl_events(entry):
+    url = NHL_URL.format(code=entry["team_code"], season=entry["season"])
+    payload = fetch_json(url)
+    events, count = [], 0
+
+    for game in payload.get("games", []):
+        home = _name_from(game.get("homeTeam", {}), "placeName", "commonName") \
+            or game.get("homeTeam", {}).get("abbrev", "")
+        away = _name_from(game.get("awayTeam", {}), "placeName", "commonName") \
+            or game.get("awayTeam", {}).get("abbrev", "")
+        start = parse_utc(str(game.get("startTimeUTC", "")).replace("T", " "))
+        if start is None or not home or not away:
+            continue
+
+        stage = cfg.NHL_STAGES.get(game.get("gameType"), "2026/27 Season")
+        venue = game.get("venue", {})
+        if isinstance(venue, dict):
+            venue = venue.get("default")
+
+        pseudo = {"gender": entry["gender"], "sport": entry["sport"], "names": {}}
+        title = "%s %s @ %s" % (cfg.SPORTS[entry["sport"]]["emoji"],
+                                team_label(pseudo, away),
+                                team_label(pseudo, home))
+        notes = "%s\n%s" % (entry["competition"], stage)
+        events.extend(make_event("nhl-%s@sports-calendar" % game.get("id"), title,
+                                 start, cfg.SPORTS[entry["sport"]]["minutes"],
+                                 venue, notes))
+        count += 1
+    return events, count
+
+
+def build_official_events():
+    """NBA and NHL straight from the leagues, so preseason and playoffs appear."""
+    builders = {"nba": build_nba_events, "nhl": build_nhl_events}
+    events = []
+
+    for entry in getattr(cfg, "OFFICIAL_SOURCES", []):
+        name = entry["source"]
+        try:
+            built, count = builders[name](entry)
+        except Exception as err:  # noqa: BLE001
+            note("OFFICIAL %s failed (%s), falling back to fixturedownload" % (name, err))
+            built, count = [], 0
+
+        if count == 0:
+            fallback = dict(entry.get("fallback") or {})
+            if fallback:
+                note("OFFICIAL %s returned nothing, using %s"
+                     % (name, fallback.get("slug")))
+                fallback.update({"sport": entry["sport"], "gender": entry["gender"],
+                                 "names": {}, "competition": entry["competition"]})
+                events.extend(build_league_events(fallback))
+            continue
+
+        note("OFFICIAL %s: %d events" % (name, count))
+        print("  %s (official): %d events" % (name, count))
+        events.extend(built)
+
+    return events
+
+
+
+def _unfold_ics(text):
+    """iCalendar wraps long lines; continuation lines start with a space."""
+    lines = []
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        if raw.startswith((" ", "\t")) and lines:
+            lines[-1] += raw[1:]
+        else:
+            lines.append(raw)
+    return lines
+
+
+def _split_summary(summary):
+    """'Home - Away [LC] (1-2)' -> (home, away, tag, score)."""
+    text = summary.strip()
+    for prefix in ("\u26a0\ufe0f Postponed:", "Postponed:"):
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+
+    score = None
+    if text.endswith(")") and "(" in text:
+        head, _, tail = text.rpartition("(")
+        tail = tail[:-1]
+        if "-" in tail and all(p.strip().isdigit() for p in tail.split("-", 1)):
+            score = tuple(p.strip() for p in tail.split("-", 1))
+            text = head.strip()
+
+    tag = None
+    if text.endswith("]") and "[" in text:
+        head, _, tail = text.rpartition("[")
+        tag = tail[:-1].strip()
+        text = head.strip()
+
+    for splitter in (" - ", " vs ", " v ", " @ "):
+        if splitter in text:
+            home, _, away = text.partition(splitter)
+            return home.strip(), away.strip(), tag, score
+    return None, None, tag, score
+
+
+
+def probe_ics(source, text):
+    """Describe a feed in diagnostics without adding anything to the calendar."""
+    titles, tags, dates = [], set(), []
+    summary = start = None
+    location = ""
+    sample_locations = []
+
+    for line in _unfold_ics(text):
+        if line.startswith("BEGIN:VEVENT"):
+            summary = start = None
+            location = ""
+        elif line.startswith("SUMMARY:"):
+            summary = line[8:]
+        elif line.startswith("LOCATION:"):
+            location = line[9:]
+        elif line.startswith("DTSTART"):
+            start = parse_utc(line.split(":", 1)[-1])
+        elif line.startswith("END:VEVENT"):
+            if not summary:
+                continue
+            titles.append(summary)
+            if start:
+                dates.append(start)
+            _, _, tag, _ = _split_summary(summary)
+            tags.add(tag or "(none)")
+            if location and len(sample_locations) < 2:
+                sample_locations.append(location)
+
+    future = [d for d in dates if d >= dt.datetime.now(dt.timezone.utc)]
+    span = ""
+    if dates:
+        span = " | %s to %s" % (min(dates).strftime("%Y-%m-%d"),
+                                max(dates).strftime("%Y-%m-%d"))
+
+    note("PROBE %s: %d events, %d upcoming%s | tags: %s"
+         % (source.get("name", "?"), len(titles), len(future), span,
+            ", ".join(sorted(tags))))
+    for title in titles[-6:]:
+        note("PROBE %s sample: %s" % (source.get("name", "?"), title))
+    if sample_locations:
+        note("PROBE %s venue: %s" % (source.get("name", "?"),
+                                     " / ".join(sample_locations)))
+    else:
+        note("PROBE %s venue: none in feed" % source.get("name", "?"))
+    print("  probe %s: %d events" % (source.get("name", "?"), len(titles)))
+
+
+def build_ics_events():
+    """Fixtures pulled from published team calendars."""
+    events = []
+    earliest = parse_utc(getattr(cfg, "ICS_EARLIEST", "2000-01-01") + " 00:00")
+
+    for source in getattr(cfg, "ICS_SOURCES", []):
+        try:
+            text = fetch_text(source["url"])
+        except Exception as err:  # noqa: BLE001
+            note("ICS %s failed: %s" % (source.get("name", source["url"]), err))
+            continue
+
+        if source.get("probe"):
+            probe_ics(source, text)
+            continue
+
+        sport = cfg.SPORTS[source["sport"]]
+        only = source.get("only_tags")
+        kept, seen_tags, unparsed = 0, set(), 0
+        summary = start = uid = None
+
+        for line in _unfold_ics(text):
+            if line.startswith("BEGIN:VEVENT"):
+                summary = start = uid = None
+            elif line.startswith("SUMMARY:"):
+                summary = line[8:]
+            elif line.startswith("DTSTART"):
+                start = parse_utc(line.split(":", 1)[-1])
+            elif line.startswith("UID:"):
+                uid = line[4:].strip()
+            elif line.startswith("END:VEVENT"):
+                if not summary or start is None:
+                    continue
+                if earliest and start < earliest:
+                    continue
+
+                home, away, tag, score = _split_summary(summary)
+                if not home or not away:
+                    unparsed += 1
+                    continue
+                seen_tags.add(tag or "(none)")
+                if only is not None and tag not in only:
+                    continue
+
+                pseudo = {"gender": source["gender"], "sport": source["sport"],
+                          "international": False, "names": {}}
+                home_label = team_label(pseudo, home)
+                away_label = team_label(pseudo, away)
+                if cfg.INCLUDE_SCORES and score:
+                    home_label += " [%s]" % score[0]
+                    away_label += " [%s]" % score[1]
+
+                title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
+                competition = source.get("tag_names", {}).get(tag, tag or "")
+                events.extend(make_event(
+                    "ics-%s@sports-calendar" % (uid or start.isoformat()),
+                    title, start, sport["minutes"], None, competition))
+                kept += 1
+
+        note("ICS %s: kept %d, tags seen: %s%s"
+             % (source["url"].rsplit("/", 1)[-1], kept,
+                ", ".join(sorted(seen_tags)) or "none",
+                ", %d unreadable titles" % unparsed if unparsed else ""))
+        print("  ics %s: %d events" % (source["team"], kept))
+
+    return events
+
+
 def build_f1_events():
     sport = cfg.SPORTS["f1"]
     try:
@@ -410,6 +723,9 @@ def main():
     body = []
     for league in cfg.LEAGUES:
         body.extend(build_league_events(league))
+    body.extend(build_official_events())
+    body.extend(build_ics_events())
+    body.extend(build_manual_events())
     body.extend(build_f1_events())
 
     count = len([1 for line in body if line == "BEGIN:VEVENT"])
