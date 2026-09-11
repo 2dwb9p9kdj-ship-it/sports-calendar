@@ -319,25 +319,12 @@ ICS_SOURCES = [
      "only_tags": ["FA", "LC"],
      "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"}},
 
-    # Chelsea women: this feed carries no competition tag, so everything is
-    # taken and the de-duplicator drops anything already in the calendar.
-    {"name": "Chelsea women",
-     "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/258661.ics",
+    # Chelsea women: this feed tags the competition, so no guessing.
+    {"name": "Chelsea women", "url": "https://ics.fixtur.es/v2/chelsea-women.ics",
      "sport": "football", "gender": "W", "team": "Chelsea",
-     "only_tags": None, "competition": "Cup or European fixture",
-     "strip_suffix": [" starting in 15 minutes"],
-     # An English opponent means a domestic cup, anyone else means Europe.
-     "domestic_competition": "Women's FA Cup or League Cup",
-     "european_competition": "UEFA Women's Champions League",
-     "domestic_clubs": [
-         "Arsenal", "Aston Villa", "Birmingham City", "Blackburn Rovers",
-         "Brighton & Hove Albion", "Bristol City", "Charlton Athletic",
-         "Crystal Palace", "Derby County", "Durham", "Everton", "Ipswich Town",
-         "Leicester City", "Leeds United", "Liverpool", "London City Lionesses",
-         "Manchester City", "Manchester United", "Newcastle United",
-         "Nottingham Forest", "Portsmouth", "Reading", "Sheffield United",
-         "Southampton", "Sunderland", "Tottenham Hotspur", "Watford",
-         "West Ham United", "Wolverhampton Wanderers"]},
+     "only_tags": ["CL", "FA", "LC"],
+     "tag_names": {"CL": "UEFA Women's Champions League",
+                   "FA": "Women's FA Cup", "LC": "Women's League Cup"}},
 
     # Socceroos.
     {"name": "Socceroos",
@@ -360,19 +347,17 @@ ICS_SOURCES = [
                "Japan Women": "Japan", "China PR Women": "China",
                "New Zealand Women": "New Zealand", "USA Women": "United States"}},
 
-    # --- Probe only: looking for a Chelsea Women feed that tags the
-    # competition the way the men's fixtur.es feed does. If one of these
-    # works, the competition guessing above can be deleted.
-    {"probe": True, "name": "fixtures chelsea-women",
-     "url": "https://ics.fixtur.es/v2/chelsea-women.ics"},
-    {"probe": True, "name": "fixtures chelsea-w",
-     "url": "https://ics.fixtur.es/v2/chelsea-w.ics"},
-    {"probe": True, "name": "fixtures chelsea-fc-women",
-     "url": "https://ics.fixtur.es/v2/chelsea-fc-women.ics"},
-    {"probe": True, "name": "fixtures chelsea-ladies",
-     "url": "https://ics.fixtur.es/v2/chelsea-ladies.ics"},
-    {"probe": True, "name": "fixtures womens-super-league",
-     "url": "https://ics.fixtur.es/v2/womens-super-league.ics"},
+    # --- Probe only: looking for a national team feed that tags the
+    # competition, so Socceroos and Matildas matches stop reading
+    # "Australia International" regardless of what they actually are.
+    {"probe": True, "name": "fixtures australia",
+     "url": "https://ics.fixtur.es/v2/australia.ics"},
+    {"probe": True, "name": "fixtures australia-women",
+     "url": "https://ics.fixtur.es/v2/australia-women.ics"},
+    {"probe": True, "name": "fixtures socceroos",
+     "url": "https://ics.fixtur.es/v2/socceroos.ics"},
+    {"probe": True, "name": "fixtures matildas",
+     "url": "https://ics.fixtur.es/v2/matildas.ics"},
 
     # Denver Broncos: this one carries preseason, fixturedownload does not.
     {"name": "Denver Broncos",

@@ -38,7 +38,7 @@ USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
 
 diagnostics = []
-seen_events = set()
+seen_events = {}
 
 
 def note(line):
@@ -274,9 +274,25 @@ def extra_time_suffix(league, row):
 # Event assembly
 # ---------------------------------------------------------------------------
 
-def event_key(start, home, away):
-    """Same two teams on the same day counts as the same match."""
-    return (start.date(), frozenset((home.strip(), away.strip())))
+DUPLICATE_WINDOW_HOURS = 36
+
+
+def event_key(home, away):
+    return frozenset((home.strip(), away.strip()))
+
+
+def already_seen(start, home, away):
+    """Same two teams within 36 hours is the same match, even if two sources
+    disagree about the kick-off time or land either side of midnight UTC."""
+    times = seen_events.get(event_key(home, away))
+    if not times:
+        return False
+    limit = dt.timedelta(hours=DUPLICATE_WINDOW_HOURS)
+    return any(abs(start - existing) < limit for existing in times)
+
+
+def remember_event(start, home, away):
+    seen_events.setdefault(event_key(home, away), []).append(start)
 
 
 def make_event(uid, title, start, minutes, location, notes):
@@ -358,7 +374,7 @@ def build_league_events(league):
         stage = stage.rstrip(", ").strip()
         notes = "\n".join(x for x in (league.get("competition"), stage) if x)
 
-        seen_events.add(event_key(start, home_label, away_label))
+        remember_event(start, home_label, away_label)
         number = row.get("matchnumber", index)
         uid = "%s-%s@sports-calendar" % (slugs[0], number)
 
@@ -404,7 +420,7 @@ def build_manual_events():
         else:
             title = "%s %s vs. %s" % (sport["emoji"], home_label, away_label)
 
-        seen_events.add(event_key(start, home_label, away_label))
+        remember_event(start, home_label, away_label)
         notes = "\n".join(x for x in (entry.get("competition"),
                                       entry.get("stage")) if x)
         uid = "manual-%s-%s-%s@sports-calendar" % (
@@ -489,8 +505,8 @@ def build_nhl_events(entry):
         title = "%s %s @ %s" % (cfg.SPORTS[entry["sport"]]["emoji"],
                                 team_label(pseudo, away),
                                 team_label(pseudo, home))
-        seen_events.add(event_key(start, team_label(pseudo, home),
-                                  team_label(pseudo, away)))
+        remember_event(start, team_label(pseudo, home),
+                       team_label(pseudo, away))
         notes = "%s\n%s" % (entry["competition"], stage)
         events.extend(make_event("nhl-%s@sports-calendar" % game.get("id"), title,
                                  start, cfg.SPORTS[entry["sport"]]["minutes"],
@@ -731,11 +747,10 @@ def build_ics_events():
                 home_label = team_label(pseudo, home)
                 away_label = team_label(pseudo, away)
 
-                key = event_key(start, home_label, away_label)
-                if key in seen_events:
+                if already_seen(start, home_label, away_label):
                     duplicates += 1
                     continue
-                seen_events.add(key)
+                remember_event(start, home_label, away_label)
 
                 if cfg.INCLUDE_SCORES and score:
                     if source.get("away_first"):
