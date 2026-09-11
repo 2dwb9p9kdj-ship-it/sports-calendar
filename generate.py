@@ -557,7 +557,7 @@ def _strip_symbols(text):
 SEPARATORS = (" - ", " vs. ", " vs ", " Vs ", " v ", " V ", " @ ", " at ")
 
 GENDER_MARKERS = (" (W)", " (M)", " (w)", " (m)", " Women", " Men",
-                  " women", " men", " WFC", " Ladies")
+                  " women", " men", " WFC", " Ladies", " W", " M")
 
 
 def _clean_team(name):
