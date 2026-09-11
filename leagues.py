@@ -324,7 +324,7 @@ ICS_SOURCES = [
     {"name": "Chelsea women",
      "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/258661.ics",
      "sport": "football", "gender": "W", "team": "Chelsea",
-     "only_tags": None, "competition": "Chelsea Women fixture",
+     "only_tags": None, "competition": "Cup or European fixture",
      "strip_suffix": [" starting in 15 minutes"]},
 
     # Socceroos.
