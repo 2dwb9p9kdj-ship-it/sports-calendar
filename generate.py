@@ -701,10 +701,17 @@ def build_ics_events():
         kept = duplicates = skipped = unparsed = 0
         seen_tags = set()
         summary = start = uid = location = None
+        description = categories = None
+        fields_shown = 0
 
         for line in _unfold_ics(text):
             if line.startswith("BEGIN:VEVENT"):
                 summary = start = uid = location = None
+                description = categories = None
+            elif line.startswith("DESCRIPTION:"):
+                description = line[12:]
+            elif line.startswith("CATEGORIES:"):
+                categories = line[11:]
             elif line.startswith("SUMMARY:"):
                 summary = line[8:]
             elif line.startswith("LOCATION:"):
@@ -782,6 +789,11 @@ def build_ics_events():
                 kept += 1
                 if kept <= 3:
                     note("ICS %s sample: %s" % (source.get("name", "?"), title))
+                if fields_shown < 2 and (description or categories):
+                    fields_shown += 1
+                    note("ICS %s fields: DESCRIPTION=%r CATEGORIES=%r"
+                         % (source.get("name", "?"),
+                            (description or "")[:160], (categories or "")[:80]))
 
         note("ICS %s: kept %d, %d duplicates dropped, %d filtered out, "
              "%d unreadable | tags: %s"
