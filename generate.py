@@ -669,7 +669,8 @@ def build_ics_events():
         try:
             text = fetch_text(source["url"])
         except Exception as err:  # noqa: BLE001
-            note("ICS %s failed: %s" % (source.get("name", source["url"]), err))
+            label = "PROBE" if source.get("probe") else "ICS"
+            note("%s %s failed: %s" % (label, source.get("name", source["url"]), err))
             continue
 
         if source.get("probe"):
@@ -751,6 +752,15 @@ def build_ics_events():
 
                 competition = source.get("tag_names", {}).get(
                     tag, source.get("competition", tag or ""))
+                domestic = source.get("domestic_clubs")
+                if domestic and not tag:
+                    opponent = second if wanted in first.lower() else first
+                    if opponent in domestic:
+                        competition = source.get("domestic_competition",
+                                                 competition)
+                    else:
+                        competition = source.get("european_competition",
+                                                 competition)
                 events.extend(make_event(
                     "ics-%s@sports-calendar" % (uid or start.isoformat()),
                     title, start, sport["minutes"], location, competition))
