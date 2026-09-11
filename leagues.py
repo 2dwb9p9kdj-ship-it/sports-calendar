@@ -347,18 +347,6 @@ ICS_SOURCES = [
                "Japan Women": "Japan", "China PR Women": "China",
                "New Zealand Women": "New Zealand", "USA Women": "United States"}},
 
-    # --- Probe only: looking for a national team feed that tags the
-    # competition, so Socceroos and Matildas matches stop reading
-    # "Australia International" regardless of what they actually are.
-    {"probe": True, "name": "fixtures australia",
-     "url": "https://ics.fixtur.es/v2/australia.ics"},
-    {"probe": True, "name": "fixtures australia-women",
-     "url": "https://ics.fixtur.es/v2/australia-women.ics"},
-    {"probe": True, "name": "fixtures socceroos",
-     "url": "https://ics.fixtur.es/v2/socceroos.ics"},
-    {"probe": True, "name": "fixtures matildas",
-     "url": "https://ics.fixtur.es/v2/matildas.ics"},
-
     # Denver Broncos: this one carries preseason, fixturedownload does not.
     {"name": "Denver Broncos",
      "url": "https://www.denverbroncos.com/api/addToCalendar/ag/s?text=",
