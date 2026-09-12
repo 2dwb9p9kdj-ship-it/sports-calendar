@@ -2,8 +2,9 @@ name: Build calendar
 
 on:
   schedule:
-    # Four times a day, in UTC. 22:00 UTC is 06:00 in Perth.
-    - cron: "0 22,4,10,16 * * *"
+    # Every two hours. Results can only appear as fast as the build runs, and
+    # scheduled runs are free without limit on a public repository.
+    - cron: "0 */2 * * *"
   workflow_dispatch:        # lets you press a button to run it by hand
   push:
     branches: [main]
