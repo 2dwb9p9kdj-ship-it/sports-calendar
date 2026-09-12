@@ -1,0 +1,91 @@
+name: Unlock scores
+
+# Runs when an issue titled "unlock" is opened. The unlock page creates that
+# issue for you. Only issues opened by the repository owner are acted on, so a
+# stranger cannot reveal your scores.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  unlock:
+    if: github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Add the matches to watched.json
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys
+
+          title = (os.environ.get("ISSUE_TITLE") or "").strip().lower()
+          body = os.environ.get("ISSUE_BODY") or ""
+
+          if not title.startswith("unlock"):
+              print("Not an unlock issue, ignoring.")
+              sys.exit(0)
+
+          found = re.findall(r"[A-Za-z0-9._\-@]+@sports-calendar", body)
+          if not found:
+              print("No match identifiers in the issue body.")
+              sys.exit(0)
+
+          try:
+              with open("watched.json", encoding="utf-8") as handle:
+                  data = json.load(handle)
+          except FileNotFoundError:
+              data = {"watched": []}
+
+          existing = data.get("watched", [])
+          added = [uid for uid in found if uid not in existing]
+          existing.extend(added)
+          data["watched"] = existing
+
+          with open("watched.json", "w", encoding="utf-8") as handle:
+              json.dump(data, handle, indent=2, ensure_ascii=False)
+              handle.write("\n")
+
+          print("Added %d, now watching %d." % (len(added), len(existing)))
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write("ADDED=%d\n" % len(added))
+          PY
+
+      - name: Commit the change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet watched.json; then
+            echo "Nothing changed."
+          else
+            git add watched.json
+            git commit -m "Unlock ${{ env.ADDED }} match(es) from issue #${{ github.event.issue.number }}"
+            git push
+          fi
+
+      - name: Close the issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              body: "Unlocked " + (process.env.ADDED || "0") +
+                    " match(es). The scores appear at the next build."
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number,
+              state: "closed"
+            });
