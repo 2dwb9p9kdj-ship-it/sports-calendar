@@ -89,7 +89,7 @@ LEAGUES = [
      "follow": ["Perth Glory", "Perth"], "names": {"Perth": "Perth Glory"},
      "competition": "A-League Women", "stage": "2026/27 Regular Season, {round}"},
 
-    {"slug": "australia-cup-2026", "sport": "football", "gender": "M",
+    {"slug": "australia-cup-2026", "knockout": True, "sport": "football", "gender": "M",
      "follow": ["Perth Glory", "Perth"], "names": {"Perth": "Perth Glory"},
      "competition": "Australia Cup", "stage": "2026 {round}"},
 
@@ -157,19 +157,19 @@ LEAGUES = [
      "competition": "Women's Big Bash League", "stage": "2026 Season, {round}"},
 
     # ---- Australian national teams, tournaments only -----------------------
-    {"slug": "rugby-league-world-cup-2026", "sport": "rugby_league", "gender": "M",
+    {"slug": "rugby-league-world-cup-2026", "knockout": True, "sport": "rugby_league", "gender": "M",
      "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
                "USA": "United States", "Congo DR": "DR Congo",
                "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
      "competition": "Rugby League World Cup 2026", "stage": "{round}"},
 
-    {"slug": "fifa-world-cup-2026", "sport": "football", "gender": "M",
+    {"slug": "fifa-world-cup-2026", "knockout": True, "sport": "football", "gender": "M",
      "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
                "USA": "United States", "Congo DR": "DR Congo",
                "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
      "competition": "FIFA World Cup 2026", "stage": "{round}"},
 
-    {"slug": "mens-t20-world-cup-2026", "sport": "cricket_t20", "gender": "M",
+    {"slug": "mens-t20-world-cup-2026", "knockout": True, "sport": "cricket_t20", "gender": "M",
      "international": True, "follow": ["Australia"], "names": {"IR Iran": "Iran", "Korea Republic": "South Korea",
                "USA": "United States", "Congo DR": "DR Congo",
                "T\u00fcrkiye": "Turkey", "Tonga XIII": "Tonga"},
@@ -316,13 +316,13 @@ ICS_SOURCES = [
     # Chelsea men: cups only, everything else comes from fixturedownload.
     {"name": "Chelsea men", "url": "https://ics.fixtur.es/v2/chelsea.ics",
      "sport": "football", "gender": "M", "team": "Chelsea",
-     "only_tags": ["FA", "LC"],
+     "knockout": True, "only_tags": ["FA", "LC"],
      "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"}},
 
     # Chelsea women: this feed tags the competition, so no guessing.
     {"name": "Chelsea women", "url": "https://ics.fixtur.es/v2/chelsea-women.ics",
      "sport": "football", "gender": "W", "team": "Chelsea",
-     "only_tags": ["CL", "FA", "LC"],
+     "knockout": True, "only_tags": ["CL", "FA", "LC"],
      "tag_names": {"CL": "UEFA Women's Champions League",
                    "FA": "Women's FA Cup", "LC": "Women's League Cup"}},
 

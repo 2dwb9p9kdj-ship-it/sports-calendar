@@ -38,6 +38,7 @@ JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}.json?limit=100"
 USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
 
+NOW = dt.datetime.now(dt.timezone.utc)
 diagnostics = []
 seen_events = {}
 watched = set()
@@ -69,6 +70,12 @@ def short_id(uid):
 
 def is_watched(uid):
     return uid in watched or short_id(uid) in watched
+
+
+def hold_future(competition, count):
+    if count:
+        note("HELD %d future fixture(s) in %s until the last result is unlocked"
+             % (count, competition))
 
 
 def add_pending(uid, title, start, competition):
@@ -368,7 +375,26 @@ def build_league_events(league):
     follow = set(league.get("follow") or [])
     seen_names = set()
     events = []
-    count = 0
+    count = held = 0
+
+    # In a knockout competition the next fixture gives the last result away,
+    # so it is withheld until that result has been unlocked.
+    locked_result = False
+    if league.get("knockout"):
+        for row in rows:
+            home_feed = row.get("hometeam") or row.get("home")
+            away_feed = row.get("awayteam") or row.get("away")
+            if follow and home_feed not in follow and away_feed not in follow:
+                continue
+            home_score, away_score = parse_scores(row)
+            if home_score is None:
+                continue
+            number = row.get("matchnumber")
+            if number is None:
+                continue
+            if not is_watched("%s-%s@sports-calendar" % (slugs[0], number)):
+                locked_result = True
+                break
 
     for index, row in enumerate(rows):
         home_feed = row.get("hometeam") or row.get("home")
@@ -394,6 +420,9 @@ def build_league_events(league):
         number = row.get("matchnumber", index)
         uid = "%s-%s@sports-calendar" % (slugs[0], number)
         home_score, away_score = parse_scores(row)
+        if locked_result and home_score is None and start > NOW:
+            held += 1
+            continue
         plain_home, plain_away = home_label, away_label
         if cfg.INCLUDE_SCORES and home_score is not None:
             if is_watched(uid):
@@ -425,6 +454,7 @@ def build_league_events(league):
     unmapped = sorted(n for n in seen_names if n not in league.get("names", {}))
     if unmapped:
         diagnostics.append("FEED NAMES %s: %s" % (slugs[0], " | ".join(unmapped)))
+    hold_future(league.get("competition", slugs[0]), held)
     print("  %s: %d events kept" % (slugs[0], count))
     return events
 
@@ -735,6 +765,24 @@ def build_ics_events():
 
         sport = cfg.SPORTS[source["sport"]]
         only = source.get("only_tags")
+        locked_result = False
+        held = 0
+        if source.get("knockout"):
+            u = st = None
+            for line in _unfold_ics(text):
+                if line.startswith("BEGIN:VEVENT"):
+                    u = st = None
+                elif line.startswith("UID:"):
+                    u = line[4:].strip()
+                elif line.startswith("SUMMARY:"):
+                    _, _, tg, sc = _split_summary(line[8:], source)
+                    st = (tg, sc)
+                elif line.startswith("END:VEVENT") and u and st:
+                    tg, sc = st
+                    if sc and (only is None or tg in only):
+                        if not is_watched("ics-%s@sports-calendar" % u):
+                            locked_result = True
+                            break
         wanted = source.get("team", "").lower()
         names = source.get("names", {})
         skip_words = source.get("skip_if_contains", [])
@@ -798,6 +846,9 @@ def build_ics_events():
                     continue
                 remember_event(start, home_label, away_label)
 
+                if locked_result and not score and start > NOW:
+                    held += 1
+                    continue
                 uid = "ics-%s@sports-calendar" % (uid or start.isoformat())
                 if cfg.INCLUDE_SCORES and score:
                     if is_watched(uid):
@@ -837,6 +888,7 @@ def build_ics_events():
              "%d unreadable | tags: %s"
              % (source.get("name", "?"), kept, duplicates, skipped, unparsed,
                 ", ".join(sorted(seen_tags)) or "none"))
+        hold_future(source.get("name", "?"), held)
         print("  ics %s: %d events" % (source.get("name", "?"), kept))
 
     return events
