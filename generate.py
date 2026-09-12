@@ -572,14 +572,35 @@ def build_nhl_events(entry):
             venue = venue.get("default")
 
         pseudo = {"gender": entry["gender"], "sport": entry["sport"], "names": {}}
-        title = "%s %s @ %s" % (cfg.SPORTS[entry["sport"]]["emoji"],
-                                team_label(pseudo, away),
-                                team_label(pseudo, home))
-        remember_event(start, team_label(pseudo, home),
-                       team_label(pseudo, away))
+        home_label = team_label(pseudo, home)
+        away_label = team_label(pseudo, away)
+        remember_event(start, home_label, away_label)
+
+        uid = "nhl-%s@sports-calendar" % game.get("id")
+        home_score = game.get("homeTeam", {}).get("score")
+        away_score = game.get("awayTeam", {}).get("score")
+        finished = home_score is not None and away_score is not None
+
+        suffix = ""
+        outcome = game.get("gameOutcome") or {}
+        last = str(outcome.get("lastPeriodType") or "").upper()
+        if last in ("OT", "SO"):
+            suffix = " " + last
+
+        if cfg.INCLUDE_SCORES and finished:
+            if is_watched(uid):
+                home_label += " [%s]" % home_score
+                away_label += " [%s]" % away_score
+            else:
+                add_pending(uid, "%s v %s" % (home_label, away_label), start,
+                            entry["competition"])
+                suffix = ""      # OT would give the result away on its own
+
+        title = "%s %s @ %s%s" % (cfg.SPORTS[entry["sport"]]["emoji"],
+                                  away_label, home_label, suffix)
         notes = "%s\n%s" % (entry["competition"], stage)
-        events.extend(make_event("nhl-%s@sports-calendar" % game.get("id"), title,
-                                 start, cfg.SPORTS[entry["sport"]]["minutes"],
+        events.extend(make_event(uid, title, start,
+                                 cfg.SPORTS[entry["sport"]]["minutes"],
                                  venue, notes))
         count += 1
     return events, count
@@ -768,16 +789,20 @@ def build_ics_events():
         locked_result = False
         held = 0
         if source.get("knockout"):
-            u = st = None
+            u = st = when = None
             for line in _unfold_ics(text):
                 if line.startswith("BEGIN:VEVENT"):
-                    u = st = None
+                    u = st = when = None
                 elif line.startswith("UID:"):
                     u = line[4:].strip()
+                elif line.startswith("DTSTART"):
+                    when = parse_utc(line.split(":", 1)[-1])
                 elif line.startswith("SUMMARY:"):
                     _, _, tg, sc = _split_summary(line[8:], source)
                     st = (tg, sc)
-                elif line.startswith("END:VEVENT") and u and st:
+                elif line.startswith("END:VEVENT") and u and st and when:
+                    if earliest and when < earliest:
+                        continue          # old seasons are not spoilers
                     tg, sc = st
                     if sc and (only is None or tg in only):
                         if not is_watched("ics-%s@sports-calendar" % u):
