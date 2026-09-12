@@ -377,7 +377,7 @@ def build_league_events(league):
     follow = set(league.get("follow") or [])
     seen_names = set()
     events = []
-    count = held = 0
+    count = held = upcoming = 0
 
     # In a knockout competition the next fixture gives the last result away,
     # so it is withheld until that result has been unlocked.
@@ -452,11 +452,20 @@ def build_league_events(league):
         events.extend(make_event(uid, title, start, sport["minutes"],
                                  row.get("location"), notes))
         count += 1
+        if start > NOW:
+            upcoming += 1
 
     unmapped = sorted(n for n in seen_names if n not in league.get("names", {}))
     if unmapped:
         diagnostics.append("FEED NAMES %s: %s" % (slugs[0], " | ".join(unmapped)))
     hold_future(league.get("competition", slugs[0]), held)
+
+    # A season that has run out of future fixtures is the signal that the feed
+    # needs rolling over to next season's address.
+    if count and not upcoming:
+        note("SEASON OVER %s has no fixtures left, the slug may need rolling "
+             "to next season" % slugs[0])
+
     print("  %s: %d events kept" % (slugs[0], count))
     return events
 
