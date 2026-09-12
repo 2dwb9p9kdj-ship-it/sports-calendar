@@ -34,6 +34,8 @@ FD_URLS = [
 ]
 NBA_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
 NHL_URL = "https://api-web.nhle.com/v1/club-schedule-season/{code}/{season}"
+NHL_GAME_URLS = ["https://api-web.nhle.com/v1/gamecenter/{game}/landing",
+                 "https://api-web.nhle.com/v1/gamecenter/{game}/boxscore"]
 JOLPICA_URL = "https://api.jolpi.ca/ergast/f1/{year}.json?limit=100"
 USER_AGENT = "sports-calendar/1.1 (personal calendar generator)"
 TIMEOUT = 45
@@ -552,10 +554,65 @@ def build_nba_events(entry):
     return events, count
 
 
+
+PERIOD_NAMES = {1: "1st Period", 2: "2nd Period", 3: "3rd Period"}
+
+
+def _find_by_period(blob):
+    """The period breakdown moves around between NHL endpoints, so look for it
+    rather than assuming where it lives."""
+    if isinstance(blob, dict):
+        if isinstance(blob.get("byPeriod"), list):
+            return blob["byPeriod"]
+        for value in blob.values():
+            found = _find_by_period(value)
+            if found:
+                return found
+    elif isinstance(blob, list):
+        for value in blob:
+            found = _find_by_period(value)
+            if found:
+                return found
+    return None
+
+
+def nhl_period_lines(game_id):
+    """Returns lines like '1st Period: 1 - 0', in the away then home order the
+    event title uses. Empty list if the breakdown cannot be read."""
+    for template in NHL_GAME_URLS:
+        try:
+            payload = fetch_json(template.format(game=game_id))
+        except Exception:  # noqa: BLE001
+            continue
+        rows = _find_by_period(payload)
+        if not rows:
+            continue
+        lines = []
+        for row in rows:
+            descriptor = row.get("periodDescriptor") or {}
+            number = descriptor.get("number")
+            kind = str(descriptor.get("periodType") or "").upper()
+            if kind == "OT":
+                label = "Overtime"
+            elif kind == "SO":
+                label = "Shootout"
+            else:
+                label = PERIOD_NAMES.get(number, "Period %s" % number)
+            away = row.get("away")
+            home = row.get("home")
+            if away is None or home is None:
+                continue
+            lines.append("%s: %s - %s" % (label, away, home))
+        if lines:
+            return lines
+    note("NHL could not read the period scores for game %s" % game_id)
+    return []
+
+
 def build_nhl_events(entry):
     url = NHL_URL.format(code=entry["team_code"], season=entry["season"])
     payload = fetch_json(url)
-    events, count = [], 0
+    events, count, breakdowns = [], 0, 0
 
     for game in payload.get("games", []):
         home = _name_from(game.get("homeTeam", {}), "placeName", "commonName") \
@@ -599,10 +656,20 @@ def build_nhl_events(entry):
         title = "%s %s @ %s%s" % (cfg.SPORTS[entry["sport"]]["emoji"],
                                   away_label, home_label, suffix)
         notes = "%s\n%s" % (entry["competition"], stage)
+
+        if (getattr(cfg, "NHL_PERIOD_SCORES", False) and finished
+                and is_watched(uid) and breakdowns < cfg.NHL_PERIOD_LIMIT):
+            lines = nhl_period_lines(game.get("id"))
+            if lines:
+                notes += "\n\n" + "\n".join(lines)
+                breakdowns += 1
         events.extend(make_event(uid, title, start,
                                  cfg.SPORTS[entry["sport"]]["minutes"],
                                  venue, notes))
         count += 1
+
+    if breakdowns:
+        note("NHL added period scores to %d unlocked game(s)" % breakdowns)
     return events, count
 
 

@@ -403,3 +403,8 @@ WATCHED_FILE = "watched.json"
 
 # How many finished-but-locked matches to publish for the unlock page.
 PENDING_LIMIT = 200
+
+# Period-by-period scores for ice hockey. Each one costs a separate request,
+# so only unlocked games are fetched and the number is capped per build.
+NHL_PERIOD_SCORES = True
+NHL_PERIOD_LIMIT = 120
