@@ -39,6 +39,31 @@ TIMEOUT = 45
 
 diagnostics = []
 seen_events = {}
+watched = set()
+pending = []
+
+
+def load_watched():
+    """Matches you have told the unlock page you have already seen."""
+    try:
+        with open(cfg.WATCHED_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        note("WATCHED %s not found, treating every result as unseen"
+             % cfg.WATCHED_FILE)
+        return set()
+    except Exception as err:  # noqa: BLE001
+        note("WATCHED %s could not be read (%s), treating every result as unseen"
+             % (cfg.WATCHED_FILE, err))
+        return set()
+    items = data.get("watched", []) if isinstance(data, dict) else data
+    return {str(x).strip() for x in items if str(x).strip()}
+
+
+def add_pending(uid, title, start, competition):
+    pending.append({"uid": uid, "title": title,
+                    "date": start.strftime("%Y-%m-%d %H:%M") + " UTC",
+                    "competition": competition})
 
 
 def note(line):
@@ -355,11 +380,17 @@ def build_league_events(league):
         home_label = team_label(league, home)
         away_label = team_label(league, away)
 
-        if cfg.INCLUDE_SCORES:
-            home_score, away_score = parse_scores(row)
-            if home_score is not None:
+        number = row.get("matchnumber", index)
+        uid = "%s-%s@sports-calendar" % (slugs[0], number)
+        home_score, away_score = parse_scores(row)
+        plain_home, plain_away = home_label, away_label
+        if cfg.INCLUDE_SCORES and home_score is not None:
+            if uid in watched:
                 home_label += " [%s]" % home_score
                 away_label += " [%s]" % away_score
+            else:
+                add_pending(uid, "%s v %s" % (plain_home, plain_away), start,
+                            league.get("competition", ""))
 
         if sport["format"] == "@":
             title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
@@ -374,9 +405,7 @@ def build_league_events(league):
         stage = stage.rstrip(", ").strip()
         notes = "\n".join(x for x in (league.get("competition"), stage) if x)
 
-        remember_event(start, home_label, away_label)
-        number = row.get("matchnumber", index)
-        uid = "%s-%s@sports-calendar" % (slugs[0], number)
+        remember_event(start, plain_home, plain_away)
 
         events.extend(make_event(uid, title, start, sport["minutes"],
                                  row.get("location"), notes))
@@ -758,13 +787,18 @@ def build_ics_events():
                     continue
                 remember_event(start, home_label, away_label)
 
+                uid = "ics-%s@sports-calendar" % (uid or start.isoformat())
                 if cfg.INCLUDE_SCORES and score:
-                    if source.get("away_first"):
-                        away_label += " [%s]" % score[0]
-                        home_label += " [%s]" % score[1]
+                    if uid in watched:
+                        if source.get("away_first"):
+                            away_label += " [%s]" % score[0]
+                            home_label += " [%s]" % score[1]
+                        else:
+                            home_label += " [%s]" % score[0]
+                            away_label += " [%s]" % score[1]
                     else:
-                        home_label += " [%s]" % score[0]
-                        away_label += " [%s]" % score[1]
+                        add_pending(uid, "%s v %s" % (home_label, away_label),
+                                    start, source.get("name", ""))
 
                 if sport["format"] == "@":
                     title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
@@ -782,9 +816,8 @@ def build_ics_events():
                     else:
                         competition = source.get("european_competition",
                                                  competition)
-                events.extend(make_event(
-                    "ics-%s@sports-calendar" % (uid or start.isoformat()),
-                    title, start, sport["minutes"], location, competition))
+                events.extend(make_event(uid, title, start, sport["minutes"],
+                                         location, competition))
                 kept += 1
                 if kept <= 3:
                     note("ICS %s sample: %s" % (source.get("name", "?"), title))
@@ -843,6 +876,8 @@ def build_f1_events():
 
 def main():
     print("Building calendar...")
+    watched.update(load_watched())
+    note("WATCHED %d matches already seen" % len(watched))
     body = []
     for league in cfg.LEAGUES:
         body.extend(build_league_events(league))
@@ -875,8 +910,22 @@ def main():
         handle.write("\r\n".join(fold(line) for line in lines) + "\r\n")
 
     print("Wrote %s with %d events" % (path, count))
+    write_pending()
     write_diagnostics()
     return 0
+
+
+def write_pending():
+    """Publish the list of finished matches whose score is still hidden."""
+    pending.sort(key=lambda item: item["date"], reverse=True)
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(cfg.OUTPUT_DIR, "pending.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"generated": dt.datetime.now(dt.timezone.utc).isoformat(),
+                   "pending": pending[:cfg.PENDING_LIMIT]},
+                  handle, ensure_ascii=False, indent=1)
+    note("PENDING %d finished matches with the score still hidden" % len(pending))
+    print("Wrote %s" % path)
 
 
 def write_diagnostics():

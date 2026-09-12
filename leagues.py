@@ -394,6 +394,12 @@ CALENDAR_NAME = "Sport"
 OUTPUT_DIR = "docs"
 OUTPUT_FILE = "calendar.ics"
 
-# Phase 1 is spoiler-safe: no scores anywhere. Phase 2 flips this on once the
-# unlock page exists.
-INCLUDE_SCORES = False
+# Scores are never shown until you have unlocked the match. Setting this to
+# False hides every score regardless, which is the phase 1 behaviour.
+INCLUDE_SCORES = True
+
+# The list of matches you have told the unlock page you have already seen.
+WATCHED_FILE = "watched.json"
+
+# How many finished-but-locked matches to publish for the unlock page.
+PENDING_LIMIT = 200
