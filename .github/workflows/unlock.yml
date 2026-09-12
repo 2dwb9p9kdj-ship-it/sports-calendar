@@ -35,7 +35,9 @@ jobs:
               print("Not an unlock issue, ignoring.")
               sys.exit(0)
 
-          found = re.findall(r"[A-Za-z0-9._\-@]+@sports-calendar", body)
+          found = re.findall(r"\b[0-9a-f]{8}\b", body)
+          found += re.findall(r"[A-Za-z0-9._\-@]+@sports-calendar", body)
+          found = list(dict.fromkeys(found))
           if not found:
               print("No match identifiers in the issue body.")
               sys.exit(0)
