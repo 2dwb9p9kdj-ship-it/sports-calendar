@@ -378,6 +378,7 @@ def build_league_events(league):
     seen_names = set()
     events = []
     count = held = upcoming = 0
+    feed_upcoming = 0
 
     # In a knockout competition the next fixture gives the last result away,
     # so it is withheld until that result has been unlocked.
@@ -404,6 +405,9 @@ def build_league_events(league):
         for value in (home_feed, away_feed):
             if value:
                 seen_names.add(value)
+        row_start = parse_utc(row.get("dateutc") or row.get("date"))
+        if row_start and row_start > NOW:
+            feed_upcoming += 1
         if follow and home_feed not in follow and away_feed not in follow:
             continue
 
@@ -460,11 +464,15 @@ def build_league_events(league):
         diagnostics.append("FEED NAMES %s: %s" % (slugs[0], " | ".join(unmapped)))
     hold_future(league.get("competition", slugs[0]), held)
 
-    # A season that has run out of future fixtures is the signal that the feed
-    # needs rolling over to next season's address.
-    if count and not upcoming:
-        note("SEASON OVER %s has no fixtures left, the slug may need rolling "
-             "to next season" % slugs[0])
+    # A competition with no fixtures left anywhere is the signal that the feed
+    # needs rolling over to next season's address. Your own team running out of
+    # fixtures just means they are done for the year, which is not the same.
+    if not feed_upcoming:
+        note("SEASON OVER %s has no fixtures left in the whole competition, "
+             "roll the slug to next season when it is published" % slugs[0])
+    elif count and not upcoming:
+        note("TEAM DONE %s: the competition continues but your team has no "
+             "fixtures left in it" % slugs[0])
 
     print("  %s: %d events kept" % (slugs[0], count))
     return events
