@@ -68,6 +68,16 @@
   .note { color: var(--muted); font-size: 14px; margin: 14px 6px; }
   .hidden { display: none; }
   ol.review { padding-left: 22px; }
+  a.ghbutton {
+    display: block; text-align: center; text-decoration: none;
+    font-weight: 600; padding: 16px; margin: 18px 0 0; border-radius: 13px;
+    background: var(--accent); color: var(--accent-text);
+  }
+  textarea {
+    width: 100%; font: 13px/1.4 ui-monospace, Menlo, monospace;
+    padding: 10px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); resize: vertical;
+  }
   ol.review li { margin-bottom: 8px; }
 </style>
 </head>
@@ -93,9 +103,13 @@
   </div>
 
   <div id="done" class="hidden">
-    <p class="note">Press the green <b>Create</b> button on the GitHub page that
-      just opened. Nothing is unlocked until you do. The scores appear in your
-      calendar a couple of minutes later.</p>
+    <a class="ghbutton" id="gh" href="#" target="_blank" rel="noopener">Open GitHub</a>
+    <p class="note">That opens a new issue with everything filled in. Press the
+      green <b>Create</b> button there. Nothing is unlocked until you do, and the
+      scores appear in your calendar a couple of minutes later.</p>
+    <p class="note">If the page opens with an empty box, copy the text below and
+      paste it in yourself.</p>
+    <textarea id="fallback" readonly rows="4"></textarea>
   </div>
 </main>
 
@@ -162,10 +176,10 @@ function draw() {
       const label = document.createElement("label");
       label.className = "row";
       const box = document.createElement("input");
-      box.type = "checkbox"; box.value = x.uid;
-      box.checked = selected.has(x.uid);
+      box.type = "checkbox"; box.value = x.id;
+      box.checked = selected.has(x.id);
       box.addEventListener("change", () => {
-        box.checked ? selected.add(x.uid) : selected.delete(x.uid);
+        box.checked ? selected.add(x.id) : selected.delete(x.id);
         refreshButton();
       });
       const text = document.createElement("div");
@@ -199,7 +213,7 @@ $("filter").addEventListener("change", draw);
 $("all").addEventListener("click", () => {
   const chosen = $("filter").value;
   items.filter(x => !chosen || x.competition === chosen)
-       .forEach(x => selected.add(x.uid));
+       .forEach(x => selected.add(x.id));
   draw();
 });
 $("none").addEventListener("click", () => { selected.clear(); draw(); });
@@ -207,7 +221,7 @@ $("none").addEventListener("click", () => { selected.clear(); draw(); });
 $("next").addEventListener("click", () => {
   if (stage === 0) {
     stage = 1;
-    const picked = items.filter(x => selected.has(x.uid));
+    const picked = items.filter(x => selected.has(x.id));
     $("reviewlist").replaceChildren(...picked.map(x => {
       const li = document.createElement("li");
       li.textContent = x.title + " — " + fmtDay(x.when);
@@ -224,12 +238,17 @@ $("next").addEventListener("click", () => {
     return;
   }
 
-  const body = "Unlocking these matches:\n\n"
-    + [...selected].map(u => "- " + u).join("\n");
+  const ids = [...selected];
+  const body = "ids: " + ids.join(",");
   const url = "https://github.com/" + REPO + "/issues/new"
     + "?title=" + encodeURIComponent("unlock")
     + "&body=" + encodeURIComponent(body);
-  window.open(url, "_blank");
+
+  const link = $("gh");
+  link.href = url;
+  link.textContent = "Open GitHub for " + ids.length + " match"
+    + (ids.length === 1 ? "" : "es");
+  $("fallback").value = body;
 
   stage = 2;
   $("heading").textContent = "One more tap";
@@ -238,6 +257,7 @@ $("next").addEventListener("click", () => {
   $("done").classList.remove("hidden");
   $("next").classList.add("hidden");
   $("back").textContent = "Start again";
+  window.scrollTo(0, 0);
 });
 
 $("back").addEventListener("click", () => {

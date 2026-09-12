@@ -15,6 +15,7 @@ Nothing here needs an API key, an account or a payment method.
 
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -60,8 +61,18 @@ def load_watched():
     return {str(x).strip() for x in items if str(x).strip()}
 
 
+def short_id(uid):
+    """A short, stable code for a match. Full identifiers are far too long to
+    fit in a web address once a couple of hundred are selected."""
+    return hashlib.sha1(uid.encode("utf-8")).hexdigest()[:8]
+
+
+def is_watched(uid):
+    return uid in watched or short_id(uid) in watched
+
+
 def add_pending(uid, title, start, competition):
-    pending.append({"uid": uid, "title": title,
+    pending.append({"id": short_id(uid), "uid": uid, "title": title,
                     "date": start.strftime("%Y-%m-%d %H:%M") + " UTC",
                     "competition": competition})
 
@@ -385,7 +396,7 @@ def build_league_events(league):
         home_score, away_score = parse_scores(row)
         plain_home, plain_away = home_label, away_label
         if cfg.INCLUDE_SCORES and home_score is not None:
-            if uid in watched:
+            if is_watched(uid):
                 home_label += " [%s]" % home_score
                 away_label += " [%s]" % away_score
             else:
@@ -789,7 +800,7 @@ def build_ics_events():
 
                 uid = "ics-%s@sports-calendar" % (uid or start.isoformat())
                 if cfg.INCLUDE_SCORES and score:
-                    if uid in watched:
+                    if is_watched(uid):
                         if source.get("away_first"):
                             away_label += " [%s]" % score[0]
                             home_label += " [%s]" % score[1]
