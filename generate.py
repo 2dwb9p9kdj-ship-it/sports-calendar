@@ -1083,6 +1083,7 @@ def main():
 
     print("Wrote %s with %d events" % (path, count))
     write_pending()
+    write_notify()
     write_diagnostics()
     return 0
 
@@ -1097,6 +1098,29 @@ def write_pending():
                    "pending": pending[:cfg.PENDING_LIMIT]},
                   handle, ensure_ascii=False, indent=1)
     note("PENDING %d finished matches with the score still hidden" % len(pending))
+    print("Wrote %s" % path)
+
+
+def write_notify():
+    """One short line of text for the daily reminder shortcut to read.
+    Writes the word none when there is nothing waiting, so the shortcut can
+    stay silent rather than nagging you about an empty list."""
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(cfg.OUTPUT_DIR, "notify.txt")
+
+    if not pending:
+        text = "none"
+    else:
+        titles = [item["title"] for item in pending[:cfg.NOTIFY_LIMIT]]
+        more = len(pending) - len(titles)
+        text = "%d match%s to unlock\n%s" % (
+            len(pending), "" if len(pending) == 1 else "es",
+            "\n".join(titles))
+        if more > 0:
+            text += "\nand %d more" % more
+
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
     print("Wrote %s" % path)
 
 

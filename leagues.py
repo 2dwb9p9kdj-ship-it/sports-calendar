@@ -408,3 +408,6 @@ PENDING_LIMIT = 200
 # so only unlocked games are fetched and the number is capped per build.
 NHL_PERIOD_SCORES = True
 NHL_PERIOD_LIMIT = 120
+
+# How many match names to list in the daily reminder.
+NOTIFY_LIMIT = 8
