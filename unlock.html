@@ -2,6 +2,8 @@
 <html lang="en-AU">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-store">
+<meta http-equiv="Pragma" content="no-cache">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Unlock">
@@ -86,6 +88,7 @@
 <header>
   <h1 id="heading">Unlock scores</h1>
   <div class="sub" id="subheading">Loading…</div>
+  <div class="sub" id="version" style="font-size:12px;opacity:0.7"></div>
   <div class="tools" id="tools">
     <select id="filter"><option value="">All competitions</option></select>
     <span class="chip" id="all">Select all shown</span>
@@ -120,6 +123,7 @@
 
 <script>
 const REPO = "2dwb9p9kdj-ship-it/sports-calendar";
+const VERSION = "v2";
 let items = [], stage = 0;
 
 const $ = id => document.getElementById(id);
@@ -133,9 +137,15 @@ function parseDate(text) {
   return new Date(text.replace(" UTC", "Z").replace(" ", "T"));
 }
 
+function stampVersion() {
+  $("version").textContent = "Page " + VERSION;
+}
+
 async function load() {
+  stampVersion();
   try {
-    const res = await fetch("pending.json?t=" + Date.now());
+    const res = await fetch("pending.json?t=" + Date.now(),
+                            { cache: "no-store" });
     const data = await res.json();
     items = (data.pending || []).map(x => ({ ...x, when: parseDate(x.date) }));
   } catch (err) {
