@@ -32,6 +32,9 @@ jobs:
       - name: Generate the calendar
         run: python3 generate.py
 
+      - name: Add the unlock page
+        run: cp unlock.html docs/unlock.html
+
       - name: Package the output
         uses: actions/upload-pages-artifact@v3
         with:
