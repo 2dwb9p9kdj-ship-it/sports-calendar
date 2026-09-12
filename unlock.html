@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Unlock">
+<title>Unlock scores</title>
+<style>
+  :root {
+    --bg: #f2f2f7; --card: #ffffff; --text: #1c1c1e; --muted: #6c6c70;
+    --line: #d8d8dc; --accent: #0a84ff; --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #000000; --card: #1c1c1e; --text: #f2f2f7; --muted: #98989d;
+      --line: #38383a; --accent: #0a84ff; --accent-text: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 0 0 96px; background: var(--bg); color: var(--text);
+    font: 17px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--bg);
+    padding: 16px 16px 8px; border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.4px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  .tools { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  select, .chip {
+    font: inherit; font-size: 14px; padding: 7px 12px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+  }
+  .chip { cursor: pointer; }
+  main { padding: 8px 12px; }
+  .daygroup { margin-top: 18px; }
+  .dayhead {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--muted); padding: 0 6px 6px;
+  }
+  .list { background: var(--card); border-radius: 14px; overflow: hidden; }
+  label.row {
+    display: flex; gap: 12px; align-items: flex-start; padding: 13px 14px;
+    border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  label.row:last-child { border-bottom: 0; }
+  input[type=checkbox] { width: 24px; height: 24px; margin: 1px 0 0; flex: 0 0 auto; }
+  .title { font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px
+    calc(12px + env(safe-area-inset-bottom));
+    background: var(--bg); border-top: 1px solid var(--line);
+  }
+  button.primary {
+    width: 100%; font: inherit; font-weight: 600; padding: 15px;
+    border: 0; border-radius: 13px; background: var(--accent);
+    color: var(--accent-text);
+  }
+  button.primary:disabled { opacity: 0.35; }
+  button.plain {
+    width: 100%; font: inherit; padding: 13px; margin-top: 8px;
+    border: 1px solid var(--line); border-radius: 13px;
+    background: var(--card); color: var(--text);
+  }
+  .note { color: var(--muted); font-size: 14px; margin: 14px 6px; }
+  .hidden { display: none; }
+  ol.review { padding-left: 22px; }
+  ol.review li { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="heading">Unlock scores</h1>
+  <div class="sub" id="subheading">Loading…</div>
+  <div class="tools" id="tools">
+    <select id="filter"><option value="">All competitions</option></select>
+    <span class="chip" id="all">Select all shown</span>
+    <span class="chip" id="none">Clear</span>
+  </div>
+</header>
+
+<main>
+  <div id="pick"></div>
+
+  <div id="review" class="hidden">
+    <p class="note">You are about to unlock these matches. Their scores will
+      appear in the calendar at the next build.</p>
+    <ol class="review" id="reviewlist"></ol>
+  </div>
+
+  <div id="done" class="hidden">
+    <p class="note">Press the green <b>Create</b> button on the GitHub page that
+      just opened. Nothing is unlocked until you do. The scores appear in your
+      calendar a couple of minutes later.</p>
+  </div>
+</main>
+
+<footer>
+  <button class="primary" id="next" disabled>Confirm</button>
+  <button class="plain hidden" id="back">Back</button>
+</footer>
+
+<script>
+const REPO = "2dwb9p9kdj-ship-it/sports-calendar";
+let items = [], stage = 0;
+
+const $ = id => document.getElementById(id);
+const fmtDay = d => d.toLocaleDateString(undefined,
+  { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+const fmtTime = d => d.toLocaleTimeString(undefined,
+  { hour: "2-digit", minute: "2-digit" });
+
+function parseDate(text) {
+  // "2026-09-10 23:05 UTC"
+  return new Date(text.replace(" UTC", "Z").replace(" ", "T"));
+}
+
+async function load() {
+  try {
+    const res = await fetch("pending.json?t=" + Date.now());
+    const data = await res.json();
+    items = (data.pending || []).map(x => ({ ...x, when: parseDate(x.date) }));
+  } catch (err) {
+    $("subheading").textContent = "Could not load pending.json";
+    return;
+  }
+  const comps = [...new Set(items.map(x => x.competition))].sort();
+  comps.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c; opt.textContent = c;
+    $("filter").appendChild(opt);
+  });
+  draw();
+}
+
+function draw() {
+  const chosen = $("filter").value;
+  const shown = items.filter(x => !chosen || x.competition === chosen);
+  $("subheading").textContent = shown.length + " finished match"
+    + (shown.length === 1 ? "" : "es") + " with the score still hidden";
+
+  const groups = new Map();
+  shown.forEach(x => {
+    const key = fmtDay(x.when);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(x);
+  });
+
+  const wrap = document.createElement("div");
+  groups.forEach((rows, day) => {
+    const group = document.createElement("div");
+    group.className = "daygroup";
+    const head = document.createElement("div");
+    head.className = "dayhead"; head.textContent = day;
+    const list = document.createElement("div");
+    list.className = "list";
+    rows.forEach(x => {
+      const label = document.createElement("label");
+      label.className = "row";
+      const box = document.createElement("input");
+      box.type = "checkbox"; box.value = x.uid;
+      box.checked = selected.has(x.uid);
+      box.addEventListener("change", () => {
+        box.checked ? selected.add(x.uid) : selected.delete(x.uid);
+        refreshButton();
+      });
+      const text = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "title"; title.textContent = x.title;
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = fmtTime(x.when) + " · " + x.competition;
+      text.append(title, meta);
+      label.append(box, text);
+      list.appendChild(label);
+    });
+    group.append(head, list);
+    wrap.appendChild(group);
+  });
+  $("pick").replaceChildren(wrap);
+  refreshButton();
+}
+
+const selected = new Set();
+
+function refreshButton() {
+  const n = selected.size;
+  $("next").disabled = n === 0;
+  $("next").textContent = stage === 0
+    ? (n ? "Confirm " + n + " match" + (n === 1 ? "" : "es") : "Confirm")
+    : "Send to GitHub";
+}
+
+$("filter").addEventListener("change", draw);
+$("all").addEventListener("click", () => {
+  const chosen = $("filter").value;
+  items.filter(x => !chosen || x.competition === chosen)
+       .forEach(x => selected.add(x.uid));
+  draw();
+});
+$("none").addEventListener("click", () => { selected.clear(); draw(); });
+
+$("next").addEventListener("click", () => {
+  if (stage === 0) {
+    stage = 1;
+    const picked = items.filter(x => selected.has(x.uid));
+    $("reviewlist").replaceChildren(...picked.map(x => {
+      const li = document.createElement("li");
+      li.textContent = x.title + " — " + fmtDay(x.when);
+      return li;
+    }));
+    $("heading").textContent = "Check before sending";
+    $("tools").classList.add("hidden");
+    $("pick").classList.add("hidden");
+    $("review").classList.remove("hidden");
+    $("back").classList.remove("hidden");
+    $("subheading").textContent = selected.size + " selected";
+    refreshButton();
+    window.scrollTo(0, 0);
+    return;
+  }
+
+  const body = "Unlocking these matches:\n\n"
+    + [...selected].map(u => "- " + u).join("\n");
+  const url = "https://github.com/" + REPO + "/issues/new"
+    + "?title=" + encodeURIComponent("unlock")
+    + "&body=" + encodeURIComponent(body);
+  window.open(url, "_blank");
+
+  stage = 2;
+  $("heading").textContent = "One more tap";
+  $("subheading").textContent = "";
+  $("review").classList.add("hidden");
+  $("done").classList.remove("hidden");
+  $("next").classList.add("hidden");
+  $("back").textContent = "Start again";
+});
+
+$("back").addEventListener("click", () => {
+  if (stage === 2) { location.reload(); return; }
+  stage = 0;
+  $("heading").textContent = "Unlock scores";
+  $("tools").classList.remove("hidden");
+  $("pick").classList.remove("hidden");
+  $("review").classList.add("hidden");
+  $("back").classList.add("hidden");
+  draw();
+});
+
+load();
+</script>
+</body>
+</html>
