@@ -1073,6 +1073,8 @@ def openf1(endpoint, **params):
         if err.code == 429:
             note("OPENF1 rate limited, no more result lookups this run")
             _openf1_off[0] = True
+        elif err.code == 404:
+            return []          # OpenF1 says 404 when a query matches nothing
         else:
             note("OPENF1 %s failed: HTTP %s" % (endpoint, err.code))
         return None
@@ -1250,11 +1252,19 @@ def f1_fastest_lap(session_key):
     return best
 
 
-def f1_grid(race_key, classification):
-    """The grid as it will actually line up, with where each driver qualified."""
-    rows = openf1("starting_grid", session_key=race_key)
+def f1_grid(quali_key, race_key, classification):
+    """The grid as it will actually line up, with where each driver qualified.
+
+    OpenF1 files the grid against the qualifying session, not the race, so
+    that is tried first. The race key is kept as a fallback."""
+    rows = None
+    for label, key in (("qualifying", quali_key), ("race", race_key)):
+        rows = openf1("starting_grid", session_key=key)
+        if rows:
+            note("OPENF1 starting grid found on the %s session (%s)"
+                 % (label, key))
+            break
     if not rows:
-        note("OPENF1 no starting grid published for session %s" % race_key)
         return None
     qualified = {row["number"]: row["position"] for row in classification or []}
     out = []
@@ -1501,6 +1511,8 @@ def build_f1_events():
 
     events = []
     count = shown = locked = unmatched = fetched = 0
+    waiting = no_grid = 0
+    sampled = set()
 
     for race in races:
         grand_prix = race.get("raceName", "Grand Prix")
@@ -1564,8 +1576,10 @@ def build_f1_events():
                         needs_grid = (record is None
                                       or not record.get("grid_final"))
 
-                    if (needs_rows or needs_grid) and fetched < budget \
-                            and not _openf1_off[0]:
+                    if (needs_rows or needs_grid) and (fetched >= budget
+                                                       or _openf1_off[0]):
+                        waiting += 1
+                    elif needs_rows or needs_grid:
                         fetched += 1
                         record = dict(record or {})
                         if needs_rows:
@@ -1581,15 +1595,22 @@ def build_f1_events():
                         if needs_grid and record.get("rows"):
                             race_match = f1_match(index, target["label"],
                                                   target["start"])
+                            grid = None
                             if race_match is not None:
-                                grid = f1_grid(str(race_match["key"]),
+                                grid = f1_grid(session_key,
+                                               str(race_match["key"]),
                                                record["rows"])
-                                if grid:
-                                    record["grid"] = grid
-                                    record["names"] = {
-                                        row["number"]: row["name"]
-                                        for row in record["rows"]}
-                                    record["grid_final"] = NOW > target["start"]
+                            if grid:
+                                record["grid"] = grid
+                                record["names"] = {
+                                    row["number"]: row["name"]
+                                    for row in record["rows"]}
+                            # Stop looking once the race is under way, even if
+                            # no grid was ever published, or every build would
+                            # keep asking for something that is not coming.
+                            record["grid_final"] = NOW > target["start"]
+                            if not grid and record["grid_final"]:
+                                no_grid += 1
                         if record.get("rows"):
                             stored[session_key] = record
 
@@ -1603,6 +1624,13 @@ def build_f1_events():
                     if body:
                         notes += "\n\n" + "\n".join(body)
                         shown += 1
+                        # One sample per session type, so a run that goes
+                        # green while producing nonsense is visible here.
+                        if kind not in sampled:
+                            sampled.add(kind)
+                            example = next((line for line in body
+                                            if "(" in line), body[0])
+                            note("F1 sample %s: %s" % (label, example))
 
             events.extend(make_event(uid, title, start, minutes, circuit, notes))
 
@@ -1618,9 +1646,13 @@ def build_f1_events():
         if unmatched:
             note("F1 %d finished session(s) had no matching OpenF1 session"
                  % unmatched)
-        if fetched >= budget:
-            note("F1 hit the %d session lookup limit for one run, the rest "
-                 "will fill in on the next build" % budget)
+        if no_grid:
+            note("F1 %d session(s) have no starting grid published anywhere "
+                 "in OpenF1, so the grid is left out of those" % no_grid)
+        if waiting:
+            note("F1 %d session(s) still to look up, they will fill in over "
+                 "the next %d build(s)"
+                 % (waiting, (waiting + budget - 1) // budget))
 
     print("  formula-1: %d sessions" % count)
     return events
