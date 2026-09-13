@@ -6,6 +6,7 @@ Sources
 -------
 fixturedownload.com   fixtures, venues and results for most leagues
 api.jolpi.ca          Formula 1 session times (Ergast-compatible)
+api.openf1.org        Formula 1 results, grids and race control messages
 
 Run:  python3 generate.py
 Out:  docs/calendar.ics  and  docs/diagnostics.txt
@@ -20,7 +21,9 @@ import io
 import json
 import os
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import leagues as cfg
@@ -1003,6 +1006,482 @@ def build_ics_events():
     return events
 
 
+# ---------------------------------------------------------------------------
+# Formula 1: session times from Jolpica, results and incidents from OpenF1
+# ---------------------------------------------------------------------------
+# OpenF1 is free and keyless for historical data, which is anything more than
+# 30 minutes after a session finished. The free allowance is 30 requests a
+# minute, so every call is spaced out below and the run gives up quietly if it
+# is ever rate limited rather than half-filling the calendar.
+#
+# Finished sessions are stored in docs/f1_results.json, which the build
+# publishes to Pages alongside the calendar and reads back on the next run.
+# That is why a completed session costs no requests at all after the first
+# time. Nothing is committed to the repository and no workflow change is
+# needed.
+
+OPENF1_URL = "https://api.openf1.org/v1/%s"
+
+# The build publishes this file to Pages and reads it back on the next run.
+F1_CACHE_URL_DEFAULT = ("https://2dwb9p9kdj-ship-it.github.io/"
+                        "sports-calendar/f1_results.json")
+
+# Our session labels are not always what OpenF1 calls them.
+F1_OPENF1_NAMES = {"Grand Prix": "Race"}
+
+# Sessions Sean watches, so their results stay hidden until he ticks them off.
+F1_LOCKED_KINDS = ("qualifying", "sprint_qualifying", "sprint", "race")
+
+# Feed team names are long. These are the versions that go in the calendar.
+F1_TEAMS = {
+    "Red Bull Racing": "Red Bull",
+    "Haas F1 Team": "Haas",
+    "Kick Sauber": "Sauber",
+    "Stake F1 Team Kick Sauber": "Sauber",
+    "RB": "Racing Bulls",
+    "Visa Cash App RB": "Racing Bulls",
+    "Aston Martin Aramco": "Aston Martin",
+    "Alpine F1 Team": "Alpine",
+    "Cadillac F1 Team": "Cadillac",
+    "Audi F1 Team": "Audi",
+}
+
+# Short words in a race control message that should stay in capitals.
+RC_KEEP = {"DRS", "SC", "VSC", "FIA", "TBC", "GP", "F1", "DNF", "DNS", "DSQ"}
+
+_openf1_last = [0.0]
+_openf1_off = [False]
+_openf1_calls = [0]
+
+
+def openf1(endpoint, **params):
+    """One throttled call to OpenF1. Returns a list, or None on any failure."""
+    if _openf1_off[0]:
+        return None
+    query = "&".join("%s=%s" % (key, urllib.parse.quote(str(value)))
+                     for key, value in params.items())
+    url = OPENF1_URL % endpoint + ("?" + query if query else "")
+    spacing = getattr(cfg, "OPENF1_MIN_SECONDS", 2.2)
+    wait = spacing - (time.monotonic() - _openf1_last[0])
+    if wait > 0:
+        time.sleep(wait)
+    _openf1_last[0] = time.monotonic()
+    _openf1_calls[0] += 1
+    try:
+        payload = json.loads(fetch_text(url))
+    except urllib.error.HTTPError as err:
+        if err.code == 429:
+            note("OPENF1 rate limited, no more result lookups this run")
+            _openf1_off[0] = True
+        else:
+            note("OPENF1 %s failed: HTTP %s" % (endpoint, err.code))
+        return None
+    except Exception as err:  # noqa: BLE001
+        note("OPENF1 %s failed: %s" % (endpoint, err))
+        return None
+    return payload if isinstance(payload, list) else None
+
+
+def empty_f1_cache():
+    return {"drivers": {}, "sessions": {}}
+
+
+def load_f1_cache():
+    """Read back the results file this build published last time."""
+    url = getattr(cfg, "F1_CACHE_URL", F1_CACHE_URL_DEFAULT)
+    if not url:
+        return empty_f1_cache()
+    buster = "?t=%d" % int(NOW.timestamp())
+    try:
+        data = json.loads(fetch_text(url + buster))
+    except Exception as err:  # noqa: BLE001
+        note("F1 CACHE could not be read (%s), results will be fetched again "
+             "this run" % err)
+        return empty_f1_cache()
+    if not isinstance(data, dict):
+        return empty_f1_cache()
+    data.setdefault("drivers", {})
+    data.setdefault("sessions", {})
+    note("F1 CACHE holds %d finished session(s)" % len(data["sessions"]))
+    return data
+
+
+def save_f1_cache(cache):
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    name = getattr(cfg, "F1_CACHE_FILE", "f1_results.json")
+    path = os.path.join(cfg.OUTPUT_DIR, name)
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle, ensure_ascii=False, indent=1)
+        print("Wrote %s" % path)
+    except Exception as err:  # noqa: BLE001
+        note("F1 CACHE could not be written (%s)" % err)
+
+
+def _lap_time(seconds):
+    """91.824 becomes 1:31.824."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    minutes = int(value // 60)
+    rest = value - minutes * 60
+    if minutes:
+        return "%d:%06.3f" % (minutes, rest)
+    return "%.3f" % rest
+
+
+def _race_time(seconds):
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return None
+    hours = int(value // 3600)
+    minutes = int((value - hours * 3600) // 60)
+    rest = value - hours * 3600 - minutes * 60
+    if hours:
+        return "%d:%02d:%06.3f" % (hours, minutes, rest)
+    return "%d:%06.3f" % (minutes, rest)
+
+
+def _gap_text(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        return value.strip()
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds >= 60:
+        return "+" + (_lap_time(seconds) or "")
+    return "+%.3f" % seconds
+
+
+def _ordinal(number):
+    try:
+        value = int(number)
+    except (TypeError, ValueError):
+        return str(number)
+    if 10 <= value % 100 <= 20:
+        return "%dth" % value
+    return "%d%s" % (value, {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th"))
+
+
+def _last_set_time(duration):
+    """Qualifying holds three values, one per phase. Take the last one set."""
+    if isinstance(duration, list):
+        for value in reversed(duration):
+            if value not in (None, ""):
+                return value
+        return None
+    return duration
+
+
+def _tidy_rc(text, codes):
+    """Race control shouts in capitals. Turn it into a readable sentence."""
+    words = []
+    for word in str(text).split():
+        bare = word.strip("()[]{}.,:;!?").upper()
+        words.append(word.upper() if (bare in codes or bare in RC_KEEP)
+                     else word.lower())
+    line = " ".join(words)
+    for word in ("car", "turn", "lap", "pit"):
+        line = line.replace(" %s " % word, " %s " % word.capitalize())
+    line = line.rstrip(" .")
+    return line[:1].upper() + line[1:]
+
+
+def f1_driver_map(cache, session_key, numbers):
+    """number -> name, team and three letter code, fetched only when new."""
+    known = cache["drivers"]
+    if any(str(number) not in known for number in numbers):
+        for row in openf1("drivers", session_key=session_key) or []:
+            number = str(row.get("driver_number"))
+            if number == "None":
+                continue
+            team = row.get("team_name") or ""
+            known[number] = {
+                "name": row.get("last_name") or row.get("full_name")
+                        or ("Car %s" % number),
+                "code": (row.get("name_acronym") or "").upper(),
+                "team": F1_TEAMS.get(team, team),
+            }
+    return known
+
+
+def f1_classification(cache, session_key):
+    rows = openf1("session_result", session_key=session_key)
+    if not rows:
+        return None
+    drivers = f1_driver_map(cache, session_key,
+                            [row.get("driver_number") for row in rows])
+    out = []
+    for row in sorted(rows, key=lambda r: r.get("position") or 99):
+        number = str(row.get("driver_number"))
+        who = drivers.get(number, {"name": "Car %s" % number, "team": "",
+                                   "code": ""})
+        out.append({"position": row.get("position"), "number": number,
+                    "name": who["name"], "team": who["team"],
+                    "code": who["code"], "laps": row.get("number_of_laps"),
+                    "duration": row.get("duration"),
+                    "gap": row.get("gap_to_leader"),
+                    "dnf": bool(row.get("dnf")), "dns": bool(row.get("dns")),
+                    "dsq": bool(row.get("dsq"))})
+    return out
+
+
+def f1_fastest_lap(session_key):
+    """The quickest lap of a race. Pit out laps do not count."""
+    laps = openf1("laps", session_key=session_key)
+    if not laps:
+        return None
+    best = None
+    for lap in laps:
+        if lap.get("is_pit_out_lap"):
+            continue
+        try:
+            value = float(lap.get("lap_duration"))
+        except (TypeError, ValueError):
+            continue
+        if best is None or value < best["seconds"]:
+            best = {"seconds": value, "number": str(lap.get("driver_number")),
+                    "lap": lap.get("lap_number")}
+    return best
+
+
+def f1_grid(race_key, classification):
+    """The grid as it will actually line up, with where each driver qualified."""
+    rows = openf1("starting_grid", session_key=race_key)
+    if not rows:
+        note("OPENF1 no starting grid published for session %s" % race_key)
+        return None
+    qualified = {row["number"]: row["position"] for row in classification or []}
+    out = []
+    for row in sorted(rows, key=lambda r: r.get("position") or 99):
+        number = str(row.get("driver_number"))
+        out.append({"position": row.get("position"), "number": number,
+                    "qualified": qualified.get(number)})
+    return out
+
+
+def f1_incidents(session_key, kind, classification):
+    """Dot points built from race control messages and the classification.
+
+    Everything here is derived mechanically. Race control already writes in
+    near-English, so these read reasonably, but nothing here is judgement
+    about what mattered."""
+    codes = {row["code"] for row in classification or [] if row.get("code")}
+    by_number = {row["number"]: row["name"] for row in classification or []}
+    messages = openf1("race_control", session_key=session_key) or []
+
+    lines = []
+
+    def add(line):
+        if line and line not in lines:
+            lines.append(line)
+
+    # Who set the pace.
+    ranked = [row for row in classification or [] if row.get("position")]
+    ranked.sort(key=lambda row: row["position"])
+    if len(ranked) >= 2:
+        raw = _last_set_time(ranked[1].get("gap"))
+        margin = None
+        if isinstance(raw, (int, float)):
+            margin = "%.3fs" % float(raw)
+        elif isinstance(raw, str) and raw.strip():
+            margin = raw.strip()
+        if kind == "practice" and margin:
+            add("%s quickest, %s clear of %s"
+                % (ranked[0]["name"], margin, ranked[1]["name"]))
+        elif kind in ("qualifying", "sprint_qualifying") and margin:
+            add("%s on pole, %s clear of %s"
+                % (ranked[0]["name"], margin, ranked[1]["name"]))
+
+    # Red flags.
+    reds = [m for m in messages if str(m.get("flag", "")).upper() == "RED"]
+    if len(reds) == 1:
+        add("Session red flagged once")
+    elif len(reds) > 1:
+        add("Session red flagged %d times" % len(reds))
+
+    # Safety car and virtual safety car.
+    safety = []
+    for message in messages:
+        text = str(message.get("message", "")).upper()
+        if "DEPLOYED" not in text:
+            continue
+        lap = message.get("lap_number")
+        which = "Virtual safety car" if "VIRTUAL" in text else "Safety car"
+        safety.append("%s deployed%s"
+                      % (which, " on lap %s" % lap if lap else ""))
+    for item in safety[:2]:
+        add(item)
+    if len(safety) > 2:
+        add("Safety car deployed %d times in total" % len(safety))
+
+    # Cars that stopped, spun or made contact.
+    for message in messages:
+        text = str(message.get("message", ""))
+        upper = text.upper()
+        if not any(word in upper for word in
+                   ("STOPPED", "SPUN", "COLLISION", "CONTACT", "CAR OFF")):
+            continue
+        add(_tidy_rc(text, codes))
+
+    # Penalties actually issued.
+    for message in messages:
+        text = str(message.get("message", ""))
+        upper = text.upper()
+        if "PENALTY" not in upper or "NO FURTHER ACTION" in upper:
+            continue
+        add(_tidy_rc(text, codes))
+
+    # A driver who barely ran is usually a driver with a problem.
+    if kind == "practice":
+        counts = sorted(row.get("laps") or 0 for row in classification or [])
+        if len(counts) >= 5 and counts[len(counts) // 2] > 0:
+            median = counts[len(counts) // 2]
+            quiet = [row for row in classification or []
+                     if (row.get("laps") or 0) and row["laps"] < median * 0.7]
+            if quiet:
+                fewest = min(quiet, key=lambda row: row["laps"])
+                add("%s completed only %d lap%s, fewest of anyone"
+                    % (fewest["name"], fewest["laps"],
+                       "" if fewest["laps"] == 1 else "s"))
+
+    return lines[:getattr(cfg, "F1_BULLET_LIMIT", 6)]
+
+
+def f1_result_lines(record, kind):
+    """The body of the calendar note for one finished session."""
+    rows = record.get("rows") or []
+    lines = []
+
+    if kind in ("qualifying", "sprint_qualifying"):
+        ranked = [row for row in rows if row.get("position")]
+        total = len(ranked)
+        second = 10 + max(0, total - 10) // 2
+        heads = (("SQ3", "SQ2", "SQ1") if kind == "sprint_qualifying"
+                 else ("Q3", "Q2", "Q1"))
+        groups = [(heads[0], 1, 10), (heads[1], 11, second),
+                  (heads[2], second + 1, total)]
+        for head, first, last in groups:
+            block = [row for row in ranked if first <= row["position"] <= last]
+            if not block:
+                continue
+            if lines:
+                lines.append("")
+            lines.append(head)
+            for row in block:
+                shown = _lap_time(_last_set_time(row.get("duration")))
+                lines.append("%d. %s (%s) %s"
+                             % (row["position"], row["name"], row["team"],
+                                shown or "no time"))
+        grid = record.get("grid")
+        if grid:
+            lines.append("")
+            lines.append("Starting grid")
+            for row in grid:
+                name = record.get("names", {}).get(row["number"], row["number"])
+                dropped = (row.get("qualified")
+                           and row["qualified"] < row["position"])
+                lines.append("%d. %s%s"
+                             % (row["position"], name,
+                                " (qualified %s)" % _ordinal(row["qualified"])
+                                if dropped else ""))
+
+    elif kind in ("race", "sprint"):
+        fastest = record.get("fastest") or {}
+        for row in rows:
+            if row.get("dsq"):
+                value = "DSQ"
+            elif row.get("dns"):
+                value = "DNS"
+            elif row.get("dnf"):
+                value = "DNF"
+            elif row.get("position") == 1:
+                value = _race_time(row.get("duration")) or ""
+            else:
+                value = (_gap_text(row.get("gap"))
+                         or _race_time(row.get("duration")) or "")
+            mark = ""
+            if fastest.get("number") == row["number"]:
+                mark = " (fastest lap %s)" % _lap_time(fastest.get("seconds"))
+            lines.append("%s. %s (%s) %s%s"
+                         % (row.get("position") or "-", row["name"],
+                            row["team"], value, mark))
+
+    else:  # practice
+        for row in rows:
+            if row.get("position") == 1:
+                value = _lap_time(row.get("duration")) or "no time"
+            else:
+                value = (_gap_text(row.get("gap"))
+                         or _lap_time(row.get("duration")) or "no time")
+            laps = row.get("laps")
+            tail = ", %d lap%s" % (laps, "" if laps == 1 else "s") if laps else ""
+            lines.append("%s. %s (%s) %s%s"
+                         % (row.get("position") or "-", row["name"],
+                            row["team"], value, tail))
+
+    bullets = record.get("bullets") or []
+    if bullets:
+        if lines:
+            lines.append("")
+        lines.extend("- " + line for line in bullets)
+    return lines
+
+
+def f1_kind(label):
+    low = label.lower()
+    if low.startswith("practice"):
+        return "practice"
+    if low == "sprint qualifying":
+        return "sprint_qualifying"
+    if low == "qualifying":
+        return "qualifying"
+    if low == "sprint":
+        return "sprint"
+    return "race"
+
+
+def f1_session_index():
+    """Every OpenF1 session of the season, so each one can be matched by name
+    and start time rather than by guessing at meeting names."""
+    rows = openf1("sessions", year=cfg.F1_SEASON)
+    if not rows:
+        note("OPENF1 returned no session list, F1 results are unavailable "
+             "this run")
+        return []
+    index = []
+    for row in rows:
+        start = parse_utc(str(row.get("date_start", ""))
+                          .replace("T", " ").split("+")[0])
+        if start is None:
+            continue
+        index.append({"key": row.get("session_key"),
+                      "name": str(row.get("session_name") or "").strip(),
+                      "start": start})
+    note("OPENF1 session list: %d sessions in %s" % (len(index), cfg.F1_SEASON))
+    return index
+
+
+def f1_match(index, label, start):
+    """Find the OpenF1 session that matches one of our scheduled sessions."""
+    wanted = F1_OPENF1_NAMES.get(label, label).lower()
+    best, best_gap = None, None
+    for item in index:
+        if item["name"].lower() != wanted:
+            continue
+        gap = abs((item["start"] - start).total_seconds())
+        if gap > 6 * 3600:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = item, gap
+    return best
+
+
 def build_f1_events():
     sport = cfg.SPORTS["f1"]
     try:
@@ -1012,14 +1491,25 @@ def build_f1_events():
         return []
 
     races = payload["MRData"]["RaceTable"]["Races"]
+    results_on = getattr(cfg, "F1_RESULTS", True)
+    finalise = dt.timedelta(hours=getattr(cfg, "F1_FINALISE_HOURS", 6))
+    budget = getattr(cfg, "F1_MAX_NEW_SESSIONS", 30)
+
+    cache = load_f1_cache() if results_on else empty_f1_cache()
+    index = f1_session_index() if results_on else []
+    stored = cache["sessions"]
+
     events = []
-    count = 0
+    count = shown = locked = unmatched = fetched = 0
 
     for race in races:
         grand_prix = race.get("raceName", "Grand Prix")
         circuit = race.get("Circuit", {}).get("circuitName", "")
         round_no = race.get("round", "")
 
+        # Every session of this weekend, in one list, so qualifying can reach
+        # the grid that belongs to the race.
+        planned = []
         for key, (label, minutes) in cfg.F1_SESSIONS.items():
             if key == "Race":
                 block = {"date": race.get("date"), "time": race.get("time")}
@@ -1032,11 +1522,105 @@ def build_f1_events():
             start = parse_iso_date_time(block.get("date"), block.get("time"))
             if not start:
                 continue
+            planned.append({"key": key, "label": label, "minutes": minutes,
+                            "start": start, "kind": f1_kind(label)})
+
+        by_kind = {item["kind"]: item for item in planned}
+
+        for item in planned:
+            label, start = item["label"], item["start"]
+            kind, minutes = item["kind"], item["minutes"]
             title = "%s F1: %s (%s)" % (sport["emoji"], label, grand_prix)
+            uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no,
+                                                   item["key"])
             notes = "%s\nRound %s" % (cfg.F1_COMPETITION, round_no)
-            uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no, key)
-            events.extend(make_event(uid, title, start, minutes, circuit, notes))
             count += 1
+
+            # Nothing to look up until the session is over and OpenF1 has
+            # released it, which is 30 minutes after the finish.
+            ended = start + dt.timedelta(minutes=minutes or 60)
+            ready = results_on and NOW > ended + dt.timedelta(minutes=40)
+
+            record = None
+            if ready:
+                match = f1_match(index, label, start)
+                if match is None:
+                    unmatched += 1
+                else:
+                    session_key = str(match["key"])
+                    record = stored.get(session_key)
+                    settled = NOW > ended + finalise
+                    needs_rows = record is None or not record.get("final")
+
+                    # The grid can still change on Saturday night, so it is
+                    # looked at again until the race has actually started.
+                    target = None
+                    if kind == "qualifying":
+                        target = by_kind.get("race")
+                    elif kind == "sprint_qualifying":
+                        target = by_kind.get("sprint")
+                    needs_grid = False
+                    if target is not None and NOW > ended:
+                        needs_grid = (record is None
+                                      or not record.get("grid_final"))
+
+                    if (needs_rows or needs_grid) and fetched < budget \
+                            and not _openf1_off[0]:
+                        fetched += 1
+                        record = dict(record or {})
+                        if needs_rows:
+                            rows = f1_classification(cache, session_key)
+                            if rows is not None:
+                                record["rows"] = rows
+                                record["bullets"] = f1_incidents(
+                                    session_key, kind, rows)
+                                record["final"] = settled
+                                if kind in ("race", "sprint"):
+                                    record["fastest"] = f1_fastest_lap(
+                                        session_key)
+                        if needs_grid and record.get("rows"):
+                            race_match = f1_match(index, target["label"],
+                                                  target["start"])
+                            if race_match is not None:
+                                grid = f1_grid(str(race_match["key"]),
+                                               record["rows"])
+                                if grid:
+                                    record["grid"] = grid
+                                    record["names"] = {
+                                        row["number"]: row["name"]
+                                        for row in record["rows"]}
+                                    record["grid_final"] = NOW > target["start"]
+                        if record.get("rows"):
+                            stored[session_key] = record
+
+            if record and record.get("rows"):
+                if kind in F1_LOCKED_KINDS and not is_watched(uid):
+                    add_pending(uid, "F1 %s (%s)" % (label, grand_prix),
+                                start, cfg.F1_COMPETITION)
+                    locked += 1
+                else:
+                    body = f1_result_lines(record, kind)
+                    if body:
+                        notes += "\n\n" + "\n".join(body)
+                        shown += 1
+
+            events.extend(make_event(uid, title, start, minutes, circuit, notes))
+
+    if results_on:
+        if index:
+            live = {str(item["key"]) for item in index}
+            for key in [k for k in stored if k not in live]:
+                del stored[key]
+        save_f1_cache(cache)
+        note("F1 %d sessions, %d with results shown, %d waiting to be "
+             "unlocked, %d looked up this run, %d OpenF1 requests"
+             % (count, shown, locked, fetched, _openf1_calls[0]))
+        if unmatched:
+            note("F1 %d finished session(s) had no matching OpenF1 session"
+                 % unmatched)
+        if fetched >= budget:
+            note("F1 hit the %d session lookup limit for one run, the rest "
+                 "will fill in on the next build" % budget)
 
     print("  formula-1: %d sessions" % count)
     return events
@@ -1056,7 +1640,11 @@ def main():
     body.extend(build_official_events())
     body.extend(build_ics_events())
     body.extend(build_manual_events())
-    body.extend(build_f1_events())
+    try:
+        body.extend(build_f1_events())
+    except Exception as err:  # noqa: BLE001
+        note("F1 builder failed (%s), the rest of the calendar is unaffected"
+             % err)
 
     count = len([1 for line in body if line == "BEGIN:VEVENT"])
     note("TOTAL events written: %d" % count)
