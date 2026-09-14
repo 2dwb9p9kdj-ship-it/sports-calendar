@@ -5,6 +5,11 @@ on:
     # Every two hours. Results can only appear as fast as the build runs, and
     # scheduled runs are free without limit on a public repository.
     - cron: "0 */2 * * *"
+    # 12:45 UTC is 8:45pm in Perth, fifteen minutes before the nightly
+    # reminder. Without this the 9pm notification is built from the 8pm run
+    # and misses anything that finished in between. Perth does not observe
+    # daylight saving, so this holds all year.
+    - cron: "45 12 * * *"
   workflow_dispatch:        # lets you press a button to run it by hand
   push:
     branches: [main]
