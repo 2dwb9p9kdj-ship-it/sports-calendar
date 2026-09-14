@@ -77,16 +77,36 @@ def is_watched(uid):
     return uid in watched or short_id(uid) in watched
 
 
+def result_due(start, minutes):
+    """True once a match should have finished, going by the clock rather than
+    by whether a score has turned up."""
+    return NOW > start + dt.timedelta(minutes=minutes or 120)
+
+
+def awaiting_score(start, minutes):
+    """A match that has been played but whose score the feed has not published
+    yet. fixturedownload refreshes about once a day, so waiting for the score
+    would mean the nightly reminder arrives a day or two after the match.
+
+    Limited to a window, so a fixture that is abandoned, or that sits in a
+    competition whose feed never posts scores, stops asking to be ticked off
+    instead of nagging for the rest of the season."""
+    if not result_due(start, minutes):
+        return False
+    window = getattr(cfg, "PENDING_NO_SCORE_DAYS", 21)
+    return NOW < start + dt.timedelta(days=window)
+
+
 def hold_future(competition, count):
     if count:
         note("HELD %d future fixture(s) in %s until the last result is unlocked"
              % (count, competition))
 
 
-def add_pending(uid, title, start, competition):
+def add_pending(uid, title, start, competition, scored=True):
     pending.append({"id": short_id(uid), "uid": uid, "title": title,
                     "date": start.strftime("%Y-%m-%d %H:%M") + " UTC",
-                    "competition": competition})
+                    "competition": competition, "scored": scored})
 
 
 def note(line):
@@ -393,7 +413,9 @@ def build_league_events(league):
             if follow and home_feed not in follow and away_feed not in follow:
                 continue
             home_score, away_score = parse_scores(row)
-            if home_score is None:
+            when = parse_utc(row.get("dateutc") or row.get("date"))
+            if home_score is None and not (
+                    when and awaiting_score(when, sport["minutes"])):
                 continue
             number = row.get("matchnumber")
             if number is None:
@@ -432,14 +454,20 @@ def build_league_events(league):
         if locked_result and home_score is None and start > NOW:
             held += 1
             continue
+        # Played counts from the clock, not from the feed, so a match shows up
+        # in tonight's reminder even if the score is still a day away.
+        played = home_score is not None or awaiting_score(start,
+                                                          sport["minutes"])
         plain_home, plain_away = home_label, away_label
-        if cfg.INCLUDE_SCORES and home_score is not None:
+        if cfg.INCLUDE_SCORES and played:
             if is_watched(uid):
-                home_label += " [%s]" % home_score
-                away_label += " [%s]" % away_score
+                if home_score is not None:
+                    home_label += " [%s]" % home_score
+                    away_label += " [%s]" % away_score
             else:
                 add_pending(uid, "%s v %s" % (plain_home, plain_away), start,
-                            league.get("competition", ""))
+                            league.get("competition", ""),
+                            scored=home_score is not None)
 
         if sport["format"] == "@":
             title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
@@ -891,7 +919,8 @@ def build_ics_events():
                     if earliest and when < earliest:
                         continue          # old seasons are not spoilers
                     tg, sc = st
-                    if sc and (only is None or tg in only):
+                    ready = sc or awaiting_score(when, sport["minutes"])
+                    if ready and (only is None or tg in only):
                         if not is_watched("ics-%s@sports-calendar" % u):
                             locked_result = True
                             break
@@ -961,18 +990,21 @@ def build_ics_events():
                 if locked_result and not score and start > NOW:
                     held += 1
                     continue
+                played = bool(score) or awaiting_score(start,
+                                                       sport["minutes"])
                 uid = "ics-%s@sports-calendar" % (uid or start.isoformat())
-                if cfg.INCLUDE_SCORES and score:
+                if cfg.INCLUDE_SCORES and played:
                     if is_watched(uid):
-                        if source.get("away_first"):
+                        if score and source.get("away_first"):
                             away_label += " [%s]" % score[0]
                             home_label += " [%s]" % score[1]
-                        else:
+                        elif score:
                             home_label += " [%s]" % score[0]
                             away_label += " [%s]" % score[1]
                     else:
                         add_pending(uid, "%s v %s" % (home_label, away_label),
-                                    start, source.get("name", ""))
+                                    start, source.get("name", ""),
+                                    scored=bool(score))
 
                 if sport["format"] == "@":
                     title = "%s %s @ %s" % (sport["emoji"], away_label, home_label)
@@ -1717,7 +1749,9 @@ def write_pending():
         json.dump({"generated": dt.datetime.now(dt.timezone.utc).isoformat(),
                    "pending": pending[:cfg.PENDING_LIMIT]},
                   handle, ensure_ascii=False, indent=1)
-    note("PENDING %d finished matches with the score still hidden" % len(pending))
+    unscored = sum(1 for item in pending if not item.get("scored", True))
+    note("PENDING %d finished matches waiting to be ticked off, %d of them "
+         "still waiting for a score from the feed" % (len(pending), unscored))
     print("Wrote %s" % path)
 
 
