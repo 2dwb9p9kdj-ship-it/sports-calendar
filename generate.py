@@ -77,21 +77,21 @@ def is_watched(uid):
     return uid in watched or short_id(uid) in watched
 
 
-def result_due(start, minutes):
-    """True once a match should have finished, going by the clock rather than
-    by whether a score has turned up."""
-    return NOW > start + dt.timedelta(minutes=minutes or 120)
+def awaiting_score(start):
+    """A match that has kicked off but whose score the feed has not published
+    yet.  Two reasons this goes by the clock rather than by the score.
 
-
-def awaiting_score(start, minutes):
-    """A match that has been played but whose score the feed has not published
-    yet. fixturedownload refreshes about once a day, so waiting for the score
+    fixturedownload refreshes about once a day, so waiting for the score
     would mean the nightly reminder arrives a day or two after the match.
+
+    And a match that is still being played counts.  If Sean is watching it
+    live he already knows the score, so ticking it off is safe; if he is not
+    going to see the end of it he simply leaves it unticked.
 
     Limited to a window, so a fixture that is abandoned, or that sits in a
     competition whose feed never posts scores, stops asking to be ticked off
     instead of nagging for the rest of the season."""
-    if not result_due(start, minutes):
+    if NOW <= start:
         return False
     window = getattr(cfg, "PENDING_NO_SCORE_DAYS", 21)
     return NOW < start + dt.timedelta(days=window)
@@ -415,7 +415,7 @@ def build_league_events(league):
             home_score, away_score = parse_scores(row)
             when = parse_utc(row.get("dateutc") or row.get("date"))
             if home_score is None and not (
-                    when and awaiting_score(when, sport["minutes"])):
+                    when and awaiting_score(when)):
                 continue
             number = row.get("matchnumber")
             if number is None:
@@ -456,8 +456,7 @@ def build_league_events(league):
             continue
         # Played counts from the clock, not from the feed, so a match shows up
         # in tonight's reminder even if the score is still a day away.
-        played = home_score is not None or awaiting_score(start,
-                                                          sport["minutes"])
+        played = home_score is not None or awaiting_score(start)
         plain_home, plain_away = home_label, away_label
         if cfg.INCLUDE_SCORES and played:
             if is_watched(uid):
@@ -919,7 +918,7 @@ def build_ics_events():
                     if earliest and when < earliest:
                         continue          # old seasons are not spoilers
                     tg, sc = st
-                    ready = sc or awaiting_score(when, sport["minutes"])
+                    ready = sc or awaiting_score(when)
                     if ready and (only is None or tg in only):
                         if not is_watched("ics-%s@sports-calendar" % u):
                             locked_result = True
@@ -990,8 +989,7 @@ def build_ics_events():
                 if locked_result and not score and start > NOW:
                     held += 1
                     continue
-                played = bool(score) or awaiting_score(start,
-                                                       sport["minutes"])
+                played = bool(score) or awaiting_score(start)
                 uid = "ics-%s@sports-calendar" % (uid or start.isoformat())
                 if cfg.INCLUDE_SCORES and played:
                     if is_watched(uid):
