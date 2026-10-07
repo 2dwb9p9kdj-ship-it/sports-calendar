@@ -20,6 +20,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -1079,6 +1080,24 @@ F1_TEAMS = {
 # Short words in a race control message that should stay in capitals.
 RC_KEEP = {"DRS", "SC", "VSC", "FIA", "TBC", "GP", "F1", "DNF", "DNS", "DSQ"}
 
+# Bumped whenever the stored results would be written differently. A stored
+# session whose marker does not match is looked up again, while still being
+# shown, so the calendar never goes blank during a rebuild.
+F1_BUILD = 2
+
+# Race control ends every message about an incident with the time the incident
+# happened, and repeats that time on each follow-up. It is therefore the
+# incident's identifier, and the way to collapse "noted", "under
+# investigation" and the final decision into a single line.
+_RC_STAMP = re.compile(r"\s*\((\d{1,2}:\d{2}:\d{2})\)\s*$")
+_RC_CARS = re.compile(r"\bCARS?\s+(\d+)\s*\(([A-Za-z]{3})\)"
+                      r"(?:\s+AND\s+(\d+)\s*\(([A-Za-z]{3})\))?", re.I)
+
+RC_INCIDENT = ("STOPPED", "SPUN", "COLLISION", "CONTACT", "CAR OFF",
+               "PENALTY", "DISQUALIFIED", "RETIRED", "BLACK AND WHITE")
+RC_NO_ACTION = ("NO FURTHER ACTION", "NO FURTHER INVESTIGATION",
+                "NO INVESTIGATION", "TAKEN NO FURTHER")
+
 _openf1_last = [0.0]
 _openf1_off = [False]
 _openf1_calls = [0]
@@ -1220,25 +1239,39 @@ def _tidy_rc(text, codes):
     line = " ".join(words)
     for word in ("car", "turn", "lap", "pit"):
         line = line.replace(" %s " % word, " %s " % word.capitalize())
-    line = line.rstrip(" .")
+    line = line.rstrip(" .-")
     return line[:1].upper() + line[1:]
 
 
+def _driver_name(row, number):
+    """A surname. OpenF1 writes full names as 'Ayumu IWASA', so when the
+    surname field is missing the shouted half has to be tidied."""
+    name = str(row.get("last_name") or "").strip()
+    if not name:
+        parts = str(row.get("full_name") or "").split()
+        name = parts[-1].title() if parts else ""
+    return name or ("Car %s" % number)
+
+
 def f1_driver_map(cache, session_key, numbers):
-    """number -> name, team and three letter code, fetched only when new."""
+    """number -> name, team and three letter code, for THIS session.
+
+    Looked up every time a session's results are fetched. Drivers move
+    between teams mid-season, so a team remembered from March is wrong by
+    October: Lawson was shown in a Red Bull for months after he left it.
+    The season-wide store is kept only as a fallback for a number this
+    session's own list does not mention."""
     known = cache["drivers"]
-    if any(str(number) not in known for number in numbers):
-        for row in openf1("drivers", session_key=session_key) or []:
-            number = str(row.get("driver_number"))
-            if number == "None":
-                continue
-            team = row.get("team_name") or ""
-            known[number] = {
-                "name": row.get("last_name") or row.get("full_name")
-                        or ("Car %s" % number),
-                "code": (row.get("name_acronym") or "").upper(),
-                "team": F1_TEAMS.get(team, team),
-            }
+    for row in openf1("drivers", session_key=session_key) or []:
+        number = str(row.get("driver_number"))
+        if number == "None":
+            continue
+        team = row.get("team_name") or ""
+        known[number] = {
+            "name": _driver_name(row, number),
+            "code": (row.get("name_acronym") or "").upper(),
+            "team": F1_TEAMS.get(team, team),
+        }
     return known
 
 
@@ -1248,8 +1281,17 @@ def f1_classification(cache, session_key):
         return None
     drivers = f1_driver_map(cache, session_key,
                             [row.get("driver_number") for row in rows])
+
+    def order(row):
+        """Classified by position, then retirements by distance covered,
+        which is how a timing screen lists them."""
+        position = row.get("position")
+        if position:
+            return (0, position, 0)
+        return (1, 0, -(row.get("number_of_laps") or 0))
+
     out = []
-    for row in sorted(rows, key=lambda r: r.get("position") or 99):
+    for row in sorted(rows, key=order):
         number = str(row.get("driver_number"))
         who = drivers.get(number, {"name": "Car %s" % number, "team": "",
                                    "code": ""})
@@ -1305,6 +1347,92 @@ def f1_grid(quali_key, race_key, classification):
     return out
 
 
+def _rc_names(text, by_number):
+    """'Car 5 (BOR)' becomes 'Bortoleto'; a pair becomes 'A and B'."""
+    def swap(match):
+        first = by_number.get(match.group(1))
+        second = by_number.get(match.group(3)) if match.group(3) else None
+        if first and second:
+            return "%s and %s" % (first, second)
+        if first and not match.group(3):
+            return first
+        return match.group(0)
+    return _RC_CARS.sub(swap, text)
+
+
+def _rc_safety_cars(messages):
+    """Safety cars and virtual safety cars, counted apart and named right.
+
+    Race control writes the virtual one as 'VSC DEPLOYED' as often as
+    'VIRTUAL SAFETY CAR DEPLOYED', so looking only for the word virtual
+    reports a VSC as a full safety car."""
+    full, virtual = [], []
+    for message in messages:
+        text = str(message.get("message", "") or "").upper()
+        if "DEPLOYED" not in text:
+            continue
+        lap = message.get("lap_number")
+        if "VIRTUAL" in text or re.search(r"\bVSC\b", text):
+            virtual.append(lap)
+        else:
+            full.append(lap)
+
+    def phrase(label, laps):
+        if not laps:
+            return None
+        known = [str(lap) for lap in laps if lap]
+        if not known:
+            return "%s deployed %s" % (
+                label, "once" if len(laps) == 1 else "%d times" % len(laps))
+        if len(known) == 1:
+            return "%s on lap %s" % (label, known[0])
+        return "%s on laps %s and %s" % (label, ", ".join(known[:-1]),
+                                         known[-1])
+
+    return [line for line in (phrase("Safety car", full),
+                              phrase("Virtual safety car", virtual)) if line]
+
+
+def _rc_incidents(messages, codes, by_number):
+    """One line per incident, saying how it ended rather than every step.
+
+    Race control reports the same incident several times: noted, under
+    investigation, the decision, then the penalty being served. Grouping on
+    the incident time keeps one line, and an incident the stewards looked at
+    and let go is dropped rather than taking up a line to say nothing."""
+    groups, order = {}, []
+    for message in messages:
+        text = str(message.get("message", "") or "")
+        upper = text.upper()
+        if not any(word in upper for word in RC_INCIDENT):
+            continue
+        found = _RC_STAMP.search(text)
+        key = found.group(1) if found else upper
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(text)
+
+    lines = []
+    for key in order:
+        texts = groups[key]
+        if any(phrase in texts[-1].upper() for phrase in RC_NO_ACTION):
+            continue
+        # The decision itself reads better than the later "penalty served".
+        chosen = None
+        for text in texts:
+            upper = text.upper()
+            if "PENALTY" in upper and "SERVED" not in upper:
+                chosen = text
+                break
+        chosen = _RC_STAMP.sub("", chosen or texts[-1])
+        chosen = re.sub(r"^\s*FIA STEWARDS:\s*", "", chosen, flags=re.I)
+        # Tidy first, then put the names in, so the names keep their capitals.
+        line = _rc_names(_tidy_rc(chosen, codes), by_number)
+        lines.append(line.replace(" - ", ", "))
+    return lines
+
+
 def f1_incidents(session_key, kind, classification):
     """Dot points built from race control messages and the classification.
 
@@ -1345,37 +1473,11 @@ def f1_incidents(session_key, kind, classification):
     elif len(reds) > 1:
         add("Session red flagged %d times" % len(reds))
 
-    # Safety car and virtual safety car.
-    safety = []
-    for message in messages:
-        text = str(message.get("message", "")).upper()
-        if "DEPLOYED" not in text:
-            continue
-        lap = message.get("lap_number")
-        which = "Virtual safety car" if "VIRTUAL" in text else "Safety car"
-        safety.append("%s deployed%s"
-                      % (which, " on lap %s" % lap if lap else ""))
-    for item in safety[:2]:
-        add(item)
-    if len(safety) > 2:
-        add("Safety car deployed %d times in total" % len(safety))
+    for line in _rc_safety_cars(messages):
+        add(line)
 
-    # Cars that stopped, spun or made contact.
-    for message in messages:
-        text = str(message.get("message", ""))
-        upper = text.upper()
-        if not any(word in upper for word in
-                   ("STOPPED", "SPUN", "COLLISION", "CONTACT", "CAR OFF")):
-            continue
-        add(_tidy_rc(text, codes))
-
-    # Penalties actually issued.
-    for message in messages:
-        text = str(message.get("message", ""))
-        upper = text.upper()
-        if "PENALTY" not in upper or "NO FURTHER ACTION" in upper:
-            continue
-        add(_tidy_rc(text, codes))
+    for line in _rc_incidents(messages, codes, by_number):
+        add(line)
 
     # A driver who barely ran is usually a driver with a problem.
     if kind == "practice":
@@ -1433,23 +1535,32 @@ def f1_result_lines(record, kind):
 
     elif kind in ("race", "sprint"):
         fastest = record.get("fastest") or {}
+        place = 0
         for row in rows:
+            place += 1
+            out = False
             if row.get("dsq"):
-                value = "DSQ"
+                value, out = "DSQ", True
             elif row.get("dns"):
-                value = "DNS"
+                value, out = "DNS", True
             elif row.get("dnf"):
-                value = "DNF"
+                value, out = "DNF", True
             elif row.get("position") == 1:
                 value = _race_time(row.get("duration")) or ""
             else:
                 value = (_gap_text(row.get("gap"))
                          or _race_time(row.get("duration")) or "")
+            # A retirement is worth more with the distance it reached, and
+            # OpenF1 gives no finishing position to a car too far behind to
+            # be classified, so the numbering carries on instead.
+            laps = row.get("laps")
+            if out and laps:
+                value += ", %d lap%s" % (laps, "" if laps == 1 else "s")
             mark = ""
             if fastest.get("number") == row["number"]:
                 mark = " (fastest lap %s)" % _lap_time(fastest.get("seconds"))
             lines.append("%s. %s (%s) %s%s"
-                         % (row.get("position") or "-", row["name"],
+                         % (row.get("position") or place, row["name"],
                             row["team"], value, mark))
 
     else:  # practice
@@ -1541,10 +1652,10 @@ def build_f1_events():
 
     events = []
     count = shown = locked = unmatched = fetched = 0
-    waiting = no_grid = 0
+    waiting = no_grid = rebuilt = 0
     sampled = set()
 
-    for race in races:
+    for race in reversed(races):
         grand_prix = race.get("raceName", "Grand Prix")
         circuit = race.get("Circuit", {}).get("circuitName", "")
         round_no = race.get("round", "")
@@ -1592,7 +1703,10 @@ def build_f1_events():
                     session_key = str(match["key"])
                     record = stored.get(session_key)
                     settled = NOW > ended + finalise
-                    needs_rows = record is None or not record.get("final")
+                    needs_rows = (record is None or not record.get("final")
+                                  or record.get("build") != F1_BUILD)
+                    if record is not None and record.get("build") != F1_BUILD:
+                        rebuilt += 1
 
                     # The grid can still change on Saturday night, so it is
                     # looked at again until the race has actually started.
@@ -1619,6 +1733,7 @@ def build_f1_events():
                                 record["bullets"] = f1_incidents(
                                     session_key, kind, rows)
                                 record["final"] = settled
+                                record["build"] = F1_BUILD
                                 if kind in ("race", "sprint"):
                                     record["fastest"] = f1_fastest_lap(
                                         session_key)
@@ -1679,6 +1794,10 @@ def build_f1_events():
         if no_grid:
             note("F1 %d session(s) have no starting grid published anywhere "
                  "in OpenF1, so the grid is left out of those" % no_grid)
+        if rebuilt:
+            note("F1 %d stored session(s) are being written again in the "
+                 "current layout, the old version shows until each is done"
+                 % rebuilt)
         if waiting:
             note("F1 %d session(s) still to look up, they will fill in over "
                  "the next %d build(s)"
