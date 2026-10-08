@@ -352,6 +352,11 @@ ICS_STAGE_IGNORE = [
     "watch ", "watch the game", "download ", "support fixtur",
     "calendar not up to date", "http", "▶", "⚠", "join in",
     "get tickets", "buy tickets", "tickets",
+    # A VALARM inside the event carries its own DESCRIPTION, almost always
+    # just "Reminder". The parser skips nested blocks now, so these should
+    # never be reached, but a stage line reading "Reminder" is the exact
+    # thing that went wrong on 8 October, so it is blocked here as well.
+    "reminder", "alarm", "alert", "notification",
 ]
 
 # Named sets of month-day windows for feeds that carry no stage of their own.

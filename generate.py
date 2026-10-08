@@ -898,6 +898,22 @@ def probe_ics(source, text):
 _ICS_NEWLINE = re.compile(r"\\n|\\N|\n")
 
 
+def _prop(line, name):
+    """The value of an iCalendar property, or "" if this is another property.
+
+    Handles parameters, so both DESCRIPTION: and DESCRIPTION;LANGUAGE=en: are
+    read. Returns "" rather than None so an empty value is not mistaken for a
+    missing one."""
+    if not line.startswith(name):
+        return ""
+    rest = line[len(name):]
+    if rest.startswith(":"):
+        return rest[1:]
+    if rest.startswith(";") and ":" in rest:
+        return rest.split(":", 1)[1]
+    return ""
+
+
 def _ics_desc_lines(description):
     """A feed's DESCRIPTION split into its real lines, unescaped and trimmed.
 
@@ -1022,14 +1038,34 @@ def build_ics_events():
         summary = start = uid = location = None
         description = categories = None
 
+        # A VEVENT usually contains a VALARM, and a VALARM has a DESCRIPTION
+        # of its own, normally the single word "Reminder". Reading the last
+        # DESCRIPTION in the event therefore reads the alarm's, not the
+        # event's, so anything inside a nested BEGIN block is skipped and the
+        # first DESCRIPTION at event level is the one kept.
+        inner = 0
         for line in _unfold_ics(text):
             if line.startswith("BEGIN:VEVENT"):
                 summary = start = uid = location = None
                 description = categories = None
-            elif line.startswith("DESCRIPTION:"):
-                description = line[12:]
-            elif line.startswith("CATEGORIES:"):
-                categories = line[11:]
+                inner = 0
+                continue
+            if line.startswith("END:VEVENT"):
+                inner = 0
+            elif line.startswith("BEGIN:"):
+                inner += 1
+                continue
+            elif line.startswith("END:"):
+                inner = max(0, inner - 1)
+                continue
+            elif inner:
+                continue
+
+            if _prop(line, "DESCRIPTION"):
+                if description is None:
+                    description = _prop(line, "DESCRIPTION")
+            elif _prop(line, "CATEGORIES"):
+                categories = _prop(line, "CATEGORIES")
             elif line.startswith("SUMMARY:"):
                 summary = line[8:]
             elif line.startswith("LOCATION:"):
