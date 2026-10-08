@@ -633,6 +633,50 @@ def _find_by_period(blob):
     return None
 
 
+def _periods_from_scoring(blob):
+    """Rebuild the period breakdown out of summary.scoring.
+
+    The NHL removed summary.linescore.byPeriod from the game centre endpoints
+    at some point before 8 October 2026, which is why period scores silently
+    stopped working. What is left is summary.scoring: one entry per period,
+    each holding that period's goals, and a period with no goals is still
+    present with an empty list. Every goal carries awayScore and homeScore as
+    a running total for the whole game, so a period's own score is the total
+    at the end of it minus the total at the end of the period before."""
+    scoring = ((blob or {}).get("summary") or {}).get("scoring")
+    if not isinstance(scoring, list) or not scoring:
+        return None
+
+    rows = []
+    away_before = home_before = 0
+    for entry in scoring:
+        if not isinstance(entry, dict):
+            continue
+        away = home = None
+        for goal in entry.get("goals") or []:
+            if not isinstance(goal, dict):
+                continue
+            # Running totals only ever go up, so the highest in the period is
+            # the one at the end of it, whatever order the goals are listed in.
+            for key, current in (("awayScore", away), ("homeScore", home)):
+                value = goal.get(key)
+                if not isinstance(value, int):
+                    continue
+                best = value if current is None else max(current, value)
+                if key == "awayScore":
+                    away = best
+                else:
+                    home = best
+        if away is None:
+            away = away_before
+        if home is None:
+            home = home_before
+        rows.append({"periodDescriptor": entry.get("periodDescriptor") or {},
+                     "away": away - away_before, "home": home - home_before})
+        away_before, home_before = away, home
+    return rows or None
+
+
 def nhl_period_lines(game_id):
     """Returns lines like '1st Period: 1 - 0', in the away then home order the
     event title uses. Empty list if the breakdown cannot be read."""
@@ -649,12 +693,14 @@ def nhl_period_lines(game_id):
         except Exception as err:  # noqa: BLE001
             why.append("%s: %s" % (endpoint, err))
             continue
-        rows = _find_by_period(payload)
+        # byPeriod first, in case the NHL puts it back, then rebuild it from
+        # the per-period goals, which is where the scores live now.
+        rows = _find_by_period(payload) or _periods_from_scoring(payload)
         if not rows:
-            keys = (", ".join(sorted(payload)[:12])
+            keys = (", ".join(sorted(payload))
                     if isinstance(payload, dict) else type(payload).__name__)
-            why.append("%s: no byPeriod anywhere, top-level keys were %s"
-                       % (endpoint, keys or "none"))
+            why.append("%s: no byPeriod and no summary.scoring, all top-level "
+                       "keys were %s" % (endpoint, keys or "none"))
             continue
         lines = []
         for row in rows:
