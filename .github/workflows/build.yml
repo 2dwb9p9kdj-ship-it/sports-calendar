@@ -10,12 +10,12 @@ on:
     # and misses anything that finished in between. Perth does not observe
     # daylight saving, so this holds all year.
     - cron: "45 12 * * *"
-     workflow_dispatch:        # lets you press a button to run it by hand
-       inputs:
-         allow_shrink:
-           description: "Publish even if the event count has dropped a lot (only after rolling a season slug)"
-           type: boolean
-           default: false
+  workflow_dispatch:        # lets you press a button to run it by hand
+    inputs:
+      allow_shrink:
+        description: "Publish even if the event count has dropped a lot (only after rolling a season slug)"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -40,10 +40,11 @@ jobs:
         with:
           python-version: "3.12"
 
-         - name: Generate the calendar
-           run: python3 generate.py
-           env:
-             ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+      - name: Generate the calendar
+        run: python3 generate.py
+        env:
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+
       - name: Add the unlock page
         run: cp unlock.html docs/unlock.html
 
