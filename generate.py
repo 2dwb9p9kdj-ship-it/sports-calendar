@@ -49,6 +49,10 @@ diagnostics = []
 seen_events = {}
 watched = set()
 pending = []
+# How many events each feed produced this run. Published alongside the
+# calendar so the next run can tell a feed that genuinely has no fixtures
+# from a feed that timed out. See shrink_guard_trips().
+feed_counts = {}
 
 
 def load_watched():
@@ -387,6 +391,10 @@ def build_league_events(league):
     sport = cfg.SPORTS[league["sport"]]
     slugs = league["slug"] if isinstance(league["slug"], list) else [league["slug"]]
 
+    # Claim the slot now, so a feed that fails records a zero rather than
+    # dropping out of the counts and looking like a slug that was renamed.
+    feed_counts.setdefault("feed:%s" % slugs[0], 0)
+
     rows, used_url = None, None
     for slug in slugs:
         rows, used_url = load_feed(slug)
@@ -506,6 +514,7 @@ def build_league_events(league):
              "fixtures left in it" % slugs[0])
 
     print("  %s: %d events kept" % (slugs[0], count))
+    feed_counts["feed:%s" % slugs[0]] = count
     return events
 
 
@@ -728,6 +737,9 @@ def build_official_events():
 
     for entry in getattr(cfg, "OFFICIAL_SOURCES", []):
         name = entry["source"]
+        # Claimed before the call, so a source that fails records a zero.
+        # A fallback to fixturedownload records its own slug separately.
+        feed_counts.setdefault("official:%s" % name, 0)
         try:
             built, count = builders[name](entry)
         except Exception as err:  # noqa: BLE001
@@ -746,6 +758,7 @@ def build_official_events():
 
         note("OFFICIAL %s: %d events" % (name, count))
         print("  %s (official): %d events" % (name, count))
+        feed_counts["official:%s" % name] = count
         events.extend(built)
 
     return events
@@ -882,12 +895,89 @@ def probe_ics(source, text):
     print("  probe %s: %d events" % (source.get("name", "?"), len(titles)))
 
 
+_ICS_NEWLINE = re.compile(r"\\n|\\N|\n")
+
+
+def _ics_desc_lines(description):
+    """A feed's DESCRIPTION split into its real lines, unescaped and trimmed.
+
+    Feeds write their line breaks as the two characters backslash-n inside a
+    single folded DESCRIPTION, so splitting on a real newline is not enough."""
+    if not description:
+        return []
+    out = []
+    for part in _ICS_NEWLINE.split(description):
+        part = (part.replace("\\,", ",").replace("\\;", ";")
+                    .replace("\\\\", "\\").strip())
+        if part:
+            out.append(part)
+    return out
+
+
+def _stage_window(name, start):
+    """The stage for a date, from the month-day windows in leagues.py."""
+    windows = getattr(cfg, "ICS_STAGE_WINDOWS", {}).get(name, [])
+    when = "%02d-%02d" % (start.month, start.day)
+    for window in windows:
+        first, last = window["from"], window["to"]
+        if first <= last:
+            inside = first <= when <= last
+        else:                         # a window that wraps over new year
+            inside = when >= first or when <= last
+        if inside:
+            return window.get("stage", "")
+    return ""
+
+
+def _ics_stage(source, description, categories, start):
+    """Line 2 of the notes for an .ics fixture, or "" if the feed has none.
+
+    Works through source["stage_from"] in order and takes the first rule that
+    produces text. See the ICS_SOURCES comments in leagues.py for the rules."""
+    ignore = [word.lower() for word
+              in getattr(cfg, "ICS_STAGE_IGNORE", []) + source.get("stage_ignore", [])]
+    cut = source.get("stage_cut", "|")
+    lines = _ics_desc_lines(description)
+
+    for rule in source.get("stage_from") or []:
+        text = ""
+        if rule == "description 1":
+            text = lines[0] if len(lines) > 0 else ""
+        elif rule == "description 2":
+            text = lines[1] if len(lines) > 1 else ""
+        elif rule == "categories":
+            text = (categories or "").replace("\\,", ",").strip()
+        elif isinstance(rule, dict) and "fixed" in rule:
+            text = rule["fixed"]
+        elif isinstance(rule, dict) and "windows" in rule:
+            text = _stage_window(rule["windows"], start)
+        else:
+            note("ICS %s: stage_from rule %r not understood, skipped"
+                 % (source.get("name", "?"), rule))
+            continue
+
+        for char in cut:
+            if char and char in text:
+                text = text.split(char, 1)[0]
+        for find, replace in source.get("stage_replace", []):
+            text = text.replace(find, replace)
+        text = text.strip(" .,-–—")
+        low = text.lower()
+        if text and not any(low.startswith(word) for word in ignore):
+            return text
+    return ""
+
+
 def build_ics_events():
     """Fixtures pulled from published team calendars."""
     events = []
     earliest = parse_utc(getattr(cfg, "ICS_EARLIEST", "2000-01-01") + " 00:00")
 
     for source in getattr(cfg, "ICS_SOURCES", []):
+        # Claimed before the fetch, so a feed that fails records a zero.
+        if not source.get("probe"):
+            feed_counts.setdefault(
+                "ics:%s" % source.get("name", source["url"]), 0)
         try:
             text = fetch_text(source["url"])
         except Exception as err:  # noqa: BLE001
@@ -927,7 +1017,7 @@ def build_ics_events():
         wanted = source.get("team", "").lower()
         names = source.get("names", {})
         skip_words = source.get("skip_if_contains", [])
-        kept = duplicates = skipped = unparsed = 0
+        kept = duplicates = skipped = unparsed = staged = 0
         seen_tags = set()
         summary = start = uid = location = None
         description = categories = None
@@ -1021,17 +1111,24 @@ def build_ics_events():
                     else:
                         competition = source.get("european_competition",
                                                  competition)
+                stage = _ics_stage(source, description, categories, start)
+                if stage:
+                    staged += 1
+                notes = "\n".join(x for x in (competition, stage) if x)
                 events.extend(make_event(uid, title, start, sport["minutes"],
-                                         location, competition))
+                                         location, notes))
                 kept += 1
                 if kept <= 3:
-                    note("ICS %s sample: %s" % (source.get("name", "?"), title))
+                    note("ICS %s sample: %s | %s"
+                         % (source.get("name", "?"), title,
+                            notes.replace("\n", " / ")))
 
         note("ICS %s: kept %d, %d duplicates dropped, %d filtered out, "
-             "%d unreadable | tags: %s"
+             "%d unreadable, %d with a stage line | tags: %s"
              % (source.get("name", "?"), kept, duplicates, skipped, unparsed,
-                ", ".join(sorted(seen_tags)) or "none"))
+                staged, ", ".join(sorted(seen_tags)) or "none"))
         hold_future(source.get("name", "?"), held)
+        feed_counts["ics:%s" % source.get("name", source["url"])] = kept
         print("  ics %s: %d events" % (source.get("name", "?"), kept))
 
     return events
@@ -1635,6 +1732,7 @@ def f1_match(index, label, start):
 
 def build_f1_events():
     sport = cfg.SPORTS["f1"]
+    feed_counts.setdefault("f1:sessions", 0)
     try:
         payload = fetch_json(JOLPICA_URL.format(year=cfg.F1_SEASON))
     except Exception as err:  # noqa: BLE001
@@ -1776,9 +1874,16 @@ def build_f1_events():
                             example = next((line for line in body
                                             if "(" in line), body[0])
                             note("F1 sample %s: %s" % (label, example))
+                            # A bullet too, since the classification can be
+                            # perfect while the written commentary is wrong.
+                            bullet = next((line for line in body
+                                           if line.startswith("- ")), None)
+                            note("F1 bullet %s: %s"
+                                 % (label, bullet or "none in this session"))
 
             events.extend(make_event(uid, title, start, minutes, circuit, notes))
 
+    feed_counts["f1:sessions"] = count
     if results_on:
         if index:
             live = {str(item["key"]) for item in index}
@@ -1811,6 +1916,71 @@ def build_f1_events():
 # Main
 # ---------------------------------------------------------------------------
 
+def save_feed_counts(total):
+    """Publish this run's per-feed event counts next to the calendar."""
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(cfg.OUTPUT_DIR, "feed_counts.json")
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"generated": dt.datetime.now(dt.timezone.utc).isoformat(),
+                       "total": total, "feeds": feed_counts},
+                      handle, ensure_ascii=False, indent=1, sort_keys=True)
+        print("Wrote %s" % path)
+    except Exception as err:  # noqa: BLE001
+        note("FEED COUNTS could not be written (%s)" % err)
+
+
+def shrink_guard_trips(total):
+    """True when a feed that worked last time has quietly stopped working.
+
+    A feed that times out does not raise, it just returns nothing, so the
+    build used to publish a calendar with a whole league missing from it and
+    report success. Nothing on disk survives between runs, so the previous
+    run's counts are read back from Pages, the same way the F1 cache is."""
+    if os.environ.get("ALLOW_SHRINK", "").strip().lower() in ("1", "true", "yes"):
+        note("SHRINK GUARD skipped, this run was started with allow_shrink "
+             "ticked")
+        return False
+
+    url = getattr(cfg, "PUBLISHED_COUNTS_URL", "")
+    keep = getattr(cfg, "MIN_FEED_FRACTION", 0)
+    if not url or not keep:
+        return False
+    try:
+        previous = fetch_json(url)
+    except Exception as err:  # noqa: BLE001
+        note("SHRINK GUARD has no previous counts to compare against (%s), "
+             "publishing anyway" % err)
+        return False
+
+    before = (previous or {}).get("feeds") or {}
+    if not before:
+        return False
+
+    lost = []
+    for key, was in sorted(before.items()):
+        if key not in feed_counts:
+            continue      # the slug was renamed here, so there is nothing
+                          # to compare it against
+        now = feed_counts[key]
+        if was > 0 and now < max(1, int(was * keep)):
+            lost.append("%s had %d, now has %d" % (key, was, now))
+
+    if not lost:
+        note("SHRINK GUARD ok: %d events across %d feeds, none of them down "
+             "on the last published run" % (total, len(feed_counts)))
+        return False
+
+    note("ERROR shrink guard: the calendar has NOT been overwritten, because "
+         "%d feed(s) lost fixtures since the last published run: %s. Look at "
+         "the SKIPPED and FEED lines above. A timeout fixes itself on the "
+         "next run two hours later. If the drop is real, because a season "
+         "slug was rolled over here, run the workflow by hand from the "
+         "Actions tab with allow_shrink ticked."
+         % (len(lost), "; ".join(lost)))
+    return True
+
+
 def main():
     print("Building calendar...")
     watched.update(load_watched())
@@ -1833,6 +2003,10 @@ def main():
         note("ERROR no events produced, refusing to overwrite the calendar")
         write_diagnostics()
         return 1
+    if shrink_guard_trips(count):
+        write_diagnostics()
+        return 1
+    save_feed_counts(count)
 
     header = [
         "BEGIN:VCALENDAR",

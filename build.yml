@@ -1,0 +1,65 @@
+name: Build calendar
+
+on:
+  schedule:
+    # Every two hours. Results can only appear as fast as the build runs, and
+    # scheduled runs are free without limit on a public repository.
+    - cron: "0 */2 * * *"
+    # 12:45 UTC is 8:45pm in Perth, fifteen minutes before the nightly
+    # reminder. Without this the 9pm notification is built from the 8pm run
+    # and misses anything that finished in between. Perth does not observe
+    # daylight saving, so this holds all year.
+    - cron: "45 12 * * *"
+  workflow_dispatch:        # lets you press a button to run it by hand
+    inputs:
+      allow_shrink:
+        description: "Publish even if the event count has dropped a lot (only after rolling a season slug)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate the calendar
+        run: python3 generate.py
+        env:
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+
+      - name: Add the unlock page
+        run: cp unlock.html docs/unlock.html
+
+      - name: Package the output
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

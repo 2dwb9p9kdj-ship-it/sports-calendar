@@ -86,7 +86,9 @@ LEAGUES = [
      "competition": "A-League Men", "stage": "2026/27 Regular Season, {round}"},
 
     {"slug": "aleague-women-2026", "sport": "football", "gender": "W",
-     "follow": ["Perth Glory", "Perth"], "names": {"Perth": "Perth Glory"},
+     "follow": ["Perth Glory", "Perth"],
+     "names": {"Perth": "Perth Glory", "Sydney": "Sydney FC",
+               "Macarthur": "Macarthur FC", "Auckland": "Auckland FC"},
      "competition": "A-League Women", "stage": "2026/27 Regular Season, {round}"},
 
     {"slug": "australia-cup-2026", "knockout": True, "sport": "football", "gender": "M",
@@ -118,7 +120,17 @@ LEAGUES = [
      "competition": "National Rugby League", "stage": "2026 Season, {round}"},
 
     {"slug": "nrlw-2026", "sport": "rugby_league", "gender": "W",
-     "follow": ["Broncos"], "names": {"Broncos": "Brisbane Broncos"},
+     "follow": ["Broncos"], "names": {"Broncos": "Brisbane Broncos",
+               "Bulldogs": "Canterbury-Bankstown Bulldogs",
+               "Cowboys": "North Queensland Cowboys", "Dolphins": "Dolphins",
+               "Dragons": "St George Illawarra Dragons",
+               "Eels": "Parramatta Eels", "Knights": "Newcastle Knights",
+               "Panthers": "Penrith Panthers",
+               "Rabbitohs": "South Sydney Rabbitohs", "Raiders": "Canberra Raiders",
+               "Roosters": "Sydney Roosters",
+               "Sea Eagles": "Manly Warringah Sea Eagles",
+               "Sharks": "Cronulla-Sutherland Sharks", "Storm": "Melbourne Storm",
+               "Titans": "Gold Coast Titans", "Warriors": "New Zealand Warriors"},
      "competition": "NRL Women's Premiership", "stage": "2026 Season, {round}"},
 
     # ---- Rugby union, Western Force ---------------------------------------
@@ -312,34 +324,86 @@ NHL_STAGES = {1: "2026/27 Preseason", 2: "2026/27 Regular Season",
 #
 # fixtur.es writes titles as "Home - Away [TAG] (1-2)".
 # Set "only_tags": None to take every fixture in the feed.
+# ---------------------------------------------------------------------------
+# HOW LINE 2 OF THE NOTES IS WORKED OUT FOR AN .ics FEED
+# ---------------------------------------------------------------------------
+# fixturedownload leagues above get line 2 from their own "stage" setting,
+# because that feed carries a round number. The .ics feeds do not, so each one
+# gets a "stage_from" list instead: rules tried in order, first one that
+# produces text wins. The rules are:
+#
+#   "description 1"      the first line of the feed's own DESCRIPTION
+#   "description 2"      the second line of it
+#   "categories"         the feed's CATEGORIES property
+#   {"windows": "name"}  look the date up in ICS_STAGE_WINDOWS below
+#   {"fixed": "text"}    always this text
+#
+# Whatever comes back is trimmed at the first "|" (change with "stage_cut"),
+# because several feeds put the stage first and then a broadcast plug after a
+# pipe. Text starting with anything in ICS_STAGE_IGNORE is thrown away, which
+# is how a feed with no stage at all avoids putting "Watch the game on CBS"
+# in the notes. A feed with no "stage_from" at all keeps the old behaviour of
+# one line of notes.
+# ---------------------------------------------------------------------------
+
+# Rubbish that some feeds put in DESCRIPTION. Matched on the start of the
+# line, case-insensitive.
+ICS_STAGE_IGNORE = [
+    "watch ", "watch the game", "download ", "support fixtur",
+    "calendar not up to date", "http", "▶", "⚠", "join in",
+    "get tickets", "buy tickets", "tickets",
+]
+
+# Named sets of month-day windows for feeds that carry no stage of their own.
+# Only the month and day are used, so these keep working every year without
+# being edited. A window whose "from" is later than its "to" wraps over new
+# year. A date in no window gets no line 2 rather than a wrong one.
+ICS_STAGE_WINDOWS = {
+    # NFL: preseason through August, regular season to early January, then
+    # the playoffs. The Broncos' own feed carries no stage at all.
+    "nfl": [
+        {"from": "07-15", "to": "08-31", "stage": "Preseason"},
+        {"from": "09-01", "to": "01-07", "stage": "Regular Season"},
+        {"from": "01-08", "to": "02-20", "stage": "Postseason"},
+    ],
+}
+
 ICS_SOURCES = [
     # Chelsea men: cups only, everything else comes from fixturedownload.
+    # This feed carries no stage or round, so line 2 names the stage of the
+    # season instead of leaving the notes as a single line.
     {"name": "Chelsea men", "url": "https://ics.fixtur.es/v2/chelsea.ics",
      "sport": "football", "gender": "M", "team": "Chelsea",
      "knockout": True, "only_tags": ["FA", "LC"],
-     "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"}},
+     "tag_names": {"FA": "FA Cup", "LC": "EFL Cup"},
+     "stage_from": [{"fixed": "2026/27 Season"}]},
 
     # Chelsea women: this feed tags the competition, so no guessing.
     {"name": "Chelsea women", "url": "https://ics.fixtur.es/v2/chelsea-women.ics",
      "sport": "football", "gender": "W", "team": "Chelsea",
      "knockout": True, "only_tags": ["CL", "FA", "LC"],
      "tag_names": {"CL": "UEFA Women's Champions League",
-                   "FA": "Women's FA Cup", "LC": "Women's League Cup"}},
+                   "FA": "Women's FA Cup", "LC": "Women's League Cup"},
+     "stage_from": [{"fixed": "2026/27 Season"}]},
 
-    # Socceroos.
+    # Socceroos. This feed puts the match URL on line 1 and the competition
+    # on line 2, e.g. "Friendlies", "World Cup Grp. D", "Asian Cup Grp. D".
     {"name": "Socceroos",
      "url": "https://pub.fotmob.com/prod/pub/api/v2/calendar/team/6716.ics",
      "sport": "football", "gender": "M", "team": "Australia",
      "international": True, "only_tags": None,
      "competition": "Australia International",
+     "stage_from": ["description 2"],
      "strip_suffix": [" starting in 15 minutes"]},
 
-    # Matildas.
+    # Matildas. Line 1 is the competition, then a pipe and a broadcast plug,
+    # e.g. "International Friendlies (Women) | Watch live on Paramount +".
     {"name": "Football Australia",
      "url": "https://ics.ecal.com/ecal-sub/69219a2b0a1af200082b4a47/Football%20Australia.ics",
      "sport": "football", "gender": "W", "team": "Australia",
      "international": True, "only_tags": None,
      "competition": "Australia International",
+     "stage_from": ["description 1"],
      "skip_if_contains": ["Ticket Alert", "\U0001f3ab"],
      "names": {"Matildas": "Australia", "Australia Women": "Australia",
                "Colombia Women": "Colombia", "Germany Women": "Germany",
@@ -347,20 +411,31 @@ ICS_SOURCES = [
                "Japan Women": "Japan", "China PR Women": "China",
                "New Zealand Women": "New Zealand", "USA Women": "United States"}},
 
-    # Denver Broncos: this one carries preseason, fixturedownload does not.
+    # Denver Broncos: this one carries preseason fixtures, which
+    # fixturedownload does not, but its DESCRIPTION is only a broadcast plug,
+    # so the stage has to come from the date.
     {"name": "Denver Broncos",
      "url": "https://www.denverbroncos.com/api/addToCalendar/ag/s?text=",
      "sport": "american_football", "gender": "M", "team": "Denver Broncos",
      "only_tags": None, "away_first": True,
-     "competition": "National Football League"},
+     "competition": "National Football League",
+     "stage_from": ["description 1", {"windows": "nfl"}]},
 
     # NBA: replaces the league's own feed, which blocks GitHub. Carries
-    # preseason and venues.
+    # preseason and venues. Line 1 of DESCRIPTION is the stage, e.g.
+    # "Preseason", "NBA Regular Season", "Emirates NBA Cup, West Group A".
     {"name": "NBA",
      "url": "https://ics.ecal.com/ecal-sub/68e381838a5ca700082bcb5c/NBA.ics",
      "sport": "basketball_us", "gender": "M", "team": "Denver Nuggets",
      "only_tags": None, "away_first": True,
-     "competition": "National Basketball Association"},
+     "competition": "National Basketball Association",
+     "stage_from": ["description 1"],
+     # The feed repeats "NBA" in the stage, which line 1 of the notes has
+     # already said. Each pair is a plain find and replace, applied in order.
+     "stage_replace": [["NBA Regular Season", "Regular Season"],
+                       ["Emirates NBA Cup", "NBA Cup"],
+                       ["Regular Season AWS NBA ", "Regular Season, "],
+                       ["Regular Season NBA ", "Regular Season, "]]},
 ]
 
 # Ignore anything in those feeds before this date, otherwise a decade of old
@@ -393,6 +468,25 @@ MANUAL_FIXTURES = [
 CALENDAR_NAME = "Sport"
 OUTPUT_DIR = "docs"
 OUTPUT_FILE = "calendar.ics"
+
+# A feed that times out does not raise an error, it just returns nothing, so
+# the build used to publish a calendar with a whole league missing from it and
+# still report success. Every run now publishes docs/feed_counts.json next to
+# the calendar, and the next run reads it back and compares feed by feed. If
+# a feed that had fixtures last time now has less than this fraction of them,
+# the build refuses to overwrite the calendar and fails instead, which sends
+# the usual GitHub email about a failed workflow.
+#
+# 0.75 lets a feed shed a quarter of its fixtures without complaint, which
+# covers a knockout competition withholding the next round, and still catches
+# a whole league going missing. Set to 0 to turn the check off.
+#
+# When a drop is real, because a season slug was rolled over here, run the
+# workflow by hand from the Actions tab with allow_shrink ticked. That run
+# publishes the new counts and the scheduled runs carry on from there.
+MIN_FEED_FRACTION = 0.75
+PUBLISHED_COUNTS_URL = ("https://2dwb9p9kdj-ship-it.github.io/"
+                        "sports-calendar/feed_counts.json")
 
 # Scores are never shown until you have unlocked the match. Setting this to
 # False hides every score regardless, which is the phase 1 behaviour.
