@@ -636,13 +636,25 @@ def _find_by_period(blob):
 def nhl_period_lines(game_id):
     """Returns lines like '1st Period: 1 - 0', in the away then home order the
     event title uses. Empty list if the breakdown cannot be read."""
+    # Why each endpoint failed, so the diagnostics line can say whether the
+    # request failed or the response simply has no breakdown in it. Without
+    # this the two look identical and the fault cannot be told apart.
+    why = []
     for template in NHL_GAME_URLS:
+        # Not "kind": the loop below already uses that name for the period
+        # type, and reusing it here silently blanked the endpoint name.
+        endpoint = template.rsplit("/", 1)[-1]
         try:
             payload = fetch_json(template.format(game=game_id))
-        except Exception:  # noqa: BLE001
+        except Exception as err:  # noqa: BLE001
+            why.append("%s: %s" % (endpoint, err))
             continue
         rows = _find_by_period(payload)
         if not rows:
+            keys = (", ".join(sorted(payload)[:12])
+                    if isinstance(payload, dict) else type(payload).__name__)
+            why.append("%s: no byPeriod anywhere, top-level keys were %s"
+                       % (endpoint, keys or "none"))
             continue
         lines = []
         for row in rows:
@@ -662,7 +674,9 @@ def nhl_period_lines(game_id):
             lines.append("%s: %s - %s" % (label, away, home))
         if lines:
             return lines
-    note("NHL could not read the period scores for game %s" % game_id)
+        why.append("%s: byPeriod found but no row had both scores" % endpoint)
+    note("NHL could not read the period scores for game %s | %s"
+         % (game_id, " | ".join(why) or "no reason recorded"))
     return []
 
 
