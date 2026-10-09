@@ -16,6 +16,10 @@ on:
         description: "Publish even if the event count has dropped a lot (only after rolling a season slug)"
         type: boolean
         default: false
+      test_warning:
+        description: "Add a fake build warning, to prove the 9pm alarm still works"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -44,6 +48,7 @@ jobs:
         run: python3 generate.py
         env:
           ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+          TEST_WARNING: ${{ inputs.test_warning }}
 
       - name: Add the unlock page
         run: cp unlock.html docs/unlock.html
