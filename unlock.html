@@ -81,6 +81,16 @@
     background: var(--card); color: var(--text); resize: vertical;
   }
   ol.review li { margin-bottom: 8px; }
+  #warnings { margin: 12px 6px 0; }
+  .warn {
+    background: #fff4e5; color: #7a4100; border: 1px solid #f0c38a;
+    border-radius: 12px; padding: 12px 14px; font-size: 15px;
+    margin-bottom: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .warn { background: #3a2a10; color: #ffd8a8; border-color: #6b4a16; }
+  }
+  .warn b { display: block; margin-bottom: 2px; }
 </style>
 </head>
 <body>
@@ -97,6 +107,7 @@
 </header>
 
 <main>
+  <div id="warnings"></div>
   <div id="pick"></div>
 
   <div id="review" class="hidden">
@@ -123,7 +134,7 @@
 
 <script>
 const REPO = "2dwb9p9kdj-ship-it/sports-calendar";
-const VERSION = "v2";
+const VERSION = "v3";
 let items = [], stage = 0;
 
 const $ = id => document.getElementById(id);
@@ -141,6 +152,23 @@ function stampVersion() {
   $("version").textContent = "Page " + VERSION;
 }
 
+// A failed build check. The 9pm notification fires for these even on a night
+// with no matches, but its text is fixed, so this banner is the only place
+// the reason can actually be read.
+function showWarnings(list) {
+  const box = $("warnings");
+  box.textContent = "";
+  list.forEach(text => {
+    const div = document.createElement("div");
+    div.className = "warn";
+    const head = document.createElement("b");
+    head.textContent = "Something needs looking at";
+    div.appendChild(head);
+    div.appendChild(document.createTextNode(text));
+    box.appendChild(div);
+  });
+}
+
 async function load() {
   stampVersion();
   try {
@@ -148,6 +176,7 @@ async function load() {
                             { cache: "no-store" });
     const data = await res.json();
     items = (data.pending || []).map(x => ({ ...x, when: parseDate(x.date) }));
+    showWarnings(data.warnings || []);
   } catch (err) {
     $("subheading").textContent = "Could not load pending.json";
     return;

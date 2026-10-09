@@ -54,6 +54,34 @@ pending = []
 # from a feed that timed out. See shrink_guard_trips().
 feed_counts = {}
 
+# Assertions about what was published, not about whether the build ran. A
+# green build that quietly produces wrong content is the failure this system
+# keeps having, and the shrink guard only catches the version of it where the
+# event count drops. These catch content faults. See run_checks().
+checks = []
+
+
+def add_check(name, ok, detail, warning=None):
+    """Record one assertion about the output.
+
+    name    short label, shown in diagnostics
+    ok      True if the assertion held
+    detail  what was measured, shown either way
+    warning one plain sentence for the 9pm notification and the unlock page,
+            used only when ok is False. It must never contain the letters
+            "none", because the phone automation fires on
+            "if the text does not contain none" and would go silent.
+    """
+    if not ok and warning and "none" in warning.lower():
+        warning = warning.replace("none", "zero").replace("None", "Zero")
+    checks.append({"name": name, "ok": bool(ok), "detail": detail,
+                   "warning": warning or detail})
+
+
+def check_warnings():
+    """One sentence per failed check, for the notification and the page."""
+    return [c["warning"] for c in checks if not c["ok"]]
+
 
 def load_watched():
     """Matches you have told the unlock page you have already seen."""
@@ -729,7 +757,7 @@ def nhl_period_lines(game_id):
 def build_nhl_events(entry):
     url = NHL_URL.format(code=entry["team_code"], season=entry["season"])
     payload = fetch_json(url)
-    events, count, breakdowns = [], 0, 0
+    events, count, breakdowns, eligible = [], 0, 0, 0
 
     for game in payload.get("games", []):
         home = _name_from(game.get("homeTeam", {}), "placeName", "commonName") \
@@ -776,6 +804,7 @@ def build_nhl_events(entry):
 
         if (getattr(cfg, "NHL_PERIOD_SCORES", False) and finished
                 and is_watched(uid) and breakdowns < cfg.NHL_PERIOD_LIMIT):
+            eligible += 1
             lines = nhl_period_lines(game.get("id"))
             if lines:
                 notes += "\n\n" + "\n".join(lines)
@@ -787,6 +816,12 @@ def build_nhl_events(entry):
 
     if breakdowns:
         note("NHL added period scores to %d unlocked game(s)" % breakdowns)
+    missed = eligible - breakdowns
+    add_check("nhl period scores", not missed,
+              "%d of %d unlocked finished games have a period breakdown"
+              % (breakdowns, eligible),
+              "Build warning: %d unlocked ice hockey game(s) have a final "
+              "score but no period breakdown" % missed)
     return events, count
 
 
@@ -1049,6 +1084,7 @@ def build_ics_events():
     events = []
     earliest = parse_utc(getattr(cfg, "ICS_EARLIEST", "2000-01-01") + " 00:00")
 
+    missing_stage = []
     for source in getattr(cfg, "ICS_SOURCES", []):
         # Claimed before the fetch, so a feed that fails records a zero.
         if not source.get("probe"):
@@ -1225,8 +1261,17 @@ def build_ics_events():
                 staged, ", ".join(sorted(seen_tags)) or "none"))
         hold_future(source.get("name", "?"), held)
         feed_counts["ics:%s" % source.get("name", source["url"])] = kept
+        if source.get("stage_from") and kept and staged < kept:
+            missing_stage.append("%s %d of %d"
+                                 % (source.get("name", "?"), kept - staged, kept))
         print("  ics %s: %d events" % (source.get("name", "?"), kept))
 
+    add_check("ics stage lines", not missing_stage,
+              "every .ics feed put a stage on every event it kept"
+              if not missing_stage else
+              "events with no stage line: " + "; ".join(missing_stage),
+              "Build warning: .ics fixtures are missing their stage line (%s)"
+              % "; ".join(missing_stage))
     return events
 
 
@@ -1846,7 +1891,7 @@ def build_f1_events():
 
     events = []
     count = shown = locked = unmatched = fetched = 0
-    waiting = no_grid = rebuilt = 0
+    waiting = no_grid = rebuilt = empty_results = 0
     sampled = set()
 
     for race in reversed(races):
@@ -1960,6 +2005,8 @@ def build_f1_events():
                     locked += 1
                 else:
                     body = f1_result_lines(record, kind)
+                    if not body and (record.get("rows") or record.get("bullets")):
+                        empty_results += 1
                     if body:
                         notes += "\n\n" + "\n".join(body)
                         shown += 1
@@ -1980,6 +2027,10 @@ def build_f1_events():
             events.extend(make_event(uid, title, start, minutes, circuit, notes))
 
     feed_counts["f1:sessions"] = count
+    add_check("f1 stored results", not empty_results,
+              "%d stored session(s) produced result lines" % shown,
+              "Build warning: %d stored Formula 1 session(s) hold results "
+              "but produced no lines in the calendar" % empty_results)
     if results_on:
         if index:
             live = {str(item["key"]) for item in index}
@@ -2011,6 +2062,61 @@ def build_f1_events():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Words that have turned up as a note's second line when a feed was being
+# read wrongly. "Reminder" is what a VALARM calls itself, and it sat in every
+# NBA note for a build on 8 October.
+NOTE_JUNK = ("reminder", "alarm", "alert", "notification", "watch",
+             "download", "http", "calendar not up to date")
+
+
+def check_notes(body):
+    """Read the finished calendar and assert every event has usable notes.
+
+    Deliberately reads the written output rather than the values the builders
+    held, because the faults worth catching are the ones where a builder was
+    happy with what it produced. make_event escapes real newlines to the two
+    characters backslash-n, so that is what a note's lines are split on."""
+    missing = thin = junk = 0
+    events = 0
+    has_note = False
+    for line in body:
+        if line == "BEGIN:VEVENT":
+            events += 1
+            has_note = False
+        elif line.startswith("DESCRIPTION:"):
+            has_note = True
+            parts = [p.strip() for p in line[12:].split("\\n")]
+            parts = [p for p in parts if p]
+            if len(parts) < 2:
+                thin += 1
+            elif parts[1].lower().startswith(NOTE_JUNK):
+                junk += 1
+        elif line == "END:VEVENT" and not has_note:
+            missing += 1
+
+    faults = missing + thin + junk
+    detail = ("all %d events have a competition and a stage line" % events
+              if not faults else
+              "%d events: %d with no notes, %d with only one line, "
+              "%d whose second line looks like feed boilerplate"
+              % (events, missing, thin, junk))
+    add_check("event notes", not faults, detail,
+              "Build warning: %d calendar event(s) have missing or wrong "
+              "notes" % faults)
+
+
+def run_checks():
+    """Print every assertion, passes included, so a silent pass is visible."""
+    failed = [c for c in checks if not c["ok"]]
+    for item in checks:
+        note("CHECK %s: %s, %s"
+             % (item["name"], "PASS" if item["ok"] else "FAIL", item["detail"]))
+    if failed:
+        note("CHECK %d of %d failed. The 9pm notification will fire every "
+             "night until this is fixed." % (len(failed), len(checks)))
+    return failed
+
 
 def save_feed_counts(total):
     """Publish this run's per-feed event counts next to the calendar."""
@@ -2103,6 +2209,8 @@ def main():
         write_diagnostics()
         return 1
     save_feed_counts(count)
+    check_notes(body)
+    run_checks()
 
     header = [
         "BEGIN:VCALENDAR",
@@ -2134,6 +2242,7 @@ def write_pending():
     path = os.path.join(cfg.OUTPUT_DIR, "pending.json")
     with open(path, "w", encoding="utf-8") as handle:
         json.dump({"generated": dt.datetime.now(dt.timezone.utc).isoformat(),
+                   "warnings": check_warnings(),
                    "pending": pending[:cfg.PENDING_LIMIT]},
                   handle, ensure_ascii=False, indent=1)
     unscored = sum(1 for item in pending if not item.get("scored", True))
@@ -2143,14 +2252,19 @@ def write_pending():
 
 
 def write_notify():
-    """One short line of text for the daily reminder shortcut to read.
-    Writes the word none when there is nothing waiting, so the shortcut can
-    stay silent rather than nagging you about an empty list."""
+    """One short block of text for the daily reminder shortcut to read.
+
+    The shortcut fires when this file does NOT contain the word "none", so
+    "none" is what a quiet, healthy night writes. A failed check is put above
+    the match list, and on a quiet night it replaces "none" entirely, which
+    makes the notification fire for the fault alone. That is why no warning
+    may contain the letters "none" (add_check guards it)."""
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     path = os.path.join(cfg.OUTPUT_DIR, "notify.txt")
 
+    warnings = check_warnings()
     if not pending:
-        text = "none"
+        text = "\n".join(warnings) if warnings else "none"
     else:
         titles = [item["title"] for item in pending[:cfg.NOTIFY_LIMIT]]
         more = len(pending) - len(titles)
@@ -2159,6 +2273,15 @@ def write_notify():
             "\n".join(titles))
         if more > 0:
             text += "\nand %d more" % more
+        if warnings:
+            text = "\n".join(warnings) + "\n" + text
+
+    # Last line of defence: a warning that slipped the word through would
+    # silence the notification for everything, not just itself.
+    if warnings and "none" in text.lower():
+        note("CHECK a warning contained the word that silences the "
+             "notification, and was reworded to keep the 9pm ping alive")
+        text = re.sub("(?i)none", "zero", text)
 
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text + "\n")
