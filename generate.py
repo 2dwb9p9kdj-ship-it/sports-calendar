@@ -2108,6 +2108,17 @@ def check_notes(body):
 
 def run_checks():
     """Print every assertion, passes included, so a silent pass is visible."""
+    # A deliberate failure, for proving the whole alarm chain still works:
+    # check fails, warning reaches notify.txt, the 9pm shortcut fires, the
+    # unlock page shows the banner. Switched on only by running the workflow
+    # by hand with test_warning ticked, so it can never fire on a scheduled
+    # build. An untested alarm is worse than no alarm, because it is believed.
+    if os.environ.get("TEST_WARNING", "").strip().lower() in ("1", "true", "yes"):
+        add_check("test warning", False,
+                  "deliberate, from the test_warning tick box on this run",
+                  "Build warning: this is a test of the warning system, "
+                  "nothing is actually wrong")
+
     failed = [c for c in checks if not c["ok"]]
     for item in checks:
         note("CHECK %s: %s, %s"
