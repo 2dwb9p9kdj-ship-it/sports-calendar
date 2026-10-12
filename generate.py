@@ -55,6 +55,11 @@ pending = []
 # from a feed that timed out. See shrink_guard().
 feed_counts = {}
 
+# The Formula 1 results store, as it was read back at the start of the run.
+# A one-element list so load_f1_cache() can fill it and main() can write it
+# back if the builder dies part way through. See load_f1_cache().
+_f1_cache_holder = [None]
+
 # Assertions about what was published, not about whether the build ran. A
 # green build that quietly produces wrong content is the failure this system
 # keeps having, and the shrink guard only catches the version of it where the
@@ -1393,6 +1398,11 @@ def load_f1_cache():
     data.setdefault("drivers", {})
     data.setdefault("sessions", {})
     note("F1 CACHE holds %d finished session(s)" % len(data["sessions"]))
+    # Kept where main() can reach it. The store only survives by being
+    # rewritten every run, so when the builder crashed on 12 October it was
+    # never written, Pages dropped it, and the whole season had to be fetched
+    # again over four builds. main() writes this back on a crash instead.
+    _f1_cache_holder[0] = data
     return data
 
 
@@ -2264,6 +2274,14 @@ def main():
         note("F1 builder failed at %s: %s: %s. The rest of the calendar is "
              "unaffected, but Formula 1 is missing from it."
              % (spot, type(err).__name__, err))
+        # Write the results store back untouched. Without this a crash costs
+        # the whole season: the file only exists on Pages because each run
+        # republishes it, so a run that dies before saving silently deletes
+        # it and the next four builds spend ~400 requests fetching it again.
+        if _f1_cache_holder[0]:
+            save_f1_cache(_f1_cache_holder[0])
+            note("F1 CACHE written back unchanged, so the crash costs no "
+                 "refetching")
 
     count = len([1 for line in body if line == "BEGIN:VEVENT"])
     note("TOTAL events written: %d" % count)
