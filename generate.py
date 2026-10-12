@@ -51,7 +51,7 @@ watched = set()
 pending = []
 # How many events each feed produced this run. Published alongside the
 # calendar so the next run can tell a feed that genuinely has no fixtures
-# from a feed that timed out. See shrink_guard_trips().
+# from a feed that timed out. See shrink_guard().
 feed_counts = {}
 
 # Assertions about what was published, not about whether the build ran. A
@@ -2129,46 +2129,65 @@ def run_checks():
     return failed
 
 
-def save_feed_counts(total):
-    """Publish this run's per-feed event counts next to the calendar."""
+def save_feed_counts(total, peaks):
+    """Publish this run's per-feed counts, and each feed's best ever."""
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     path = os.path.join(cfg.OUTPUT_DIR, "feed_counts.json")
     try:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump({"generated": dt.datetime.now(dt.timezone.utc).isoformat(),
-                       "total": total, "feeds": feed_counts},
+                       "total": total, "feeds": feed_counts,
+                       "peaks": peaks or feed_counts},
                       handle, ensure_ascii=False, indent=1, sort_keys=True)
         print("Wrote %s" % path)
     except Exception as err:  # noqa: BLE001
         note("FEED COUNTS could not be written (%s)" % err)
 
 
-def shrink_guard_trips(total):
-    """True when a feed that worked last time has quietly stopped working.
+def shrink_guard(total):
+    """Warn when a feed has lost most of the fixtures it used to carry.
 
     A feed that times out does not raise, it just returns nothing, so the
-    build used to publish a calendar with a whole league missing from it and
-    report success. Nothing on disk survives between runs, so the previous
-    run's counts are read back from Pages, the same way the F1 cache is."""
-    if os.environ.get("ALLOW_SHRINK", "").strip().lower() in ("1", "true", "yes"):
-        note("SHRINK GUARD skipped, this run was started with allow_shrink "
-             "ticked")
-        return False
+    build will happily publish a calendar with a whole league missing from
+    it. Nothing on disk survives between runs, so each feed's best-ever count
+    is read back from Pages, the same way the F1 cache is.
 
-    url = getattr(cfg, "PUBLISHED_COUNTS_URL", "")
+    This used to refuse to publish, which was wrong twice over. It locked
+    itself on: a refusal publishes nothing, so the counts it compares against
+    never move, so the next run refuses for the same reason, forever, and the
+    calendar goes stale until somebody notices. And it was built before there
+    was any way to tell Sean something was wrong, which there now is. So it
+    warns through the same channel as every other check and never blocks.
+
+    Returns the peaks to publish with this run's counts."""
+    peaks = dict(feed_counts)
     keep = getattr(cfg, "MIN_FEED_FRACTION", 0)
-    if not url or not keep:
-        return False
-    try:
-        previous = fetch_json(url)
-    except Exception as err:  # noqa: BLE001
-        note("SHRINK GUARD has no previous counts to compare against (%s), "
-             "publishing anyway" % err)
-        return False
+    floor = getattr(cfg, "MIN_FEED_DROP", 3)
+    url = getattr(cfg, "PUBLISHED_COUNTS_URL", "")
 
-    before = (previous or {}).get("feeds") or {}
+    if os.environ.get("ALLOW_SHRINK", "").strip().lower() in ("1", "true", "yes"):
+        # Accept today's counts as the new normal. This is the acknowledgement
+        # for a drop that is real, such as a season slug rolled over here.
+        note("SHRINK GUARD reset: this run was started with allow_shrink "
+             "ticked, so today's counts become the mark to beat")
+        return peaks
+
+    if not url or not keep:
+        return peaks
+    try:
+        previous = fetch_json(url) or {}
+    except Exception as err:  # noqa: BLE001
+        note("SHRINK GUARD has no previous counts to compare against (%s)"
+             % err)
+        return peaks
+
+    # Compare against the best each feed has ever managed, not against last
+    # run. Comparing against last run means a feed that dies warns once and
+    # is then quietly accepted as the new normal, which is the exact silence
+    # this is meant to break.
+    before = previous.get("peaks") or previous.get("feeds") or {}
     if not before:
-        return False
+        return peaks
 
     lost = []
     for key, was in sorted(before.items()):
@@ -2176,22 +2195,20 @@ def shrink_guard_trips(total):
             continue      # the slug was renamed here, so there is nothing
                           # to compare it against
         now = feed_counts[key]
-        if was > 0 and now < max(1, int(was * keep)):
+        peaks[key] = max(now, was)
+        # Both tests must fail before this says anything. The fraction alone
+        # cries wolf on a small feed: a knockout competition withholding one
+        # of three fixtures is a 33% drop and entirely normal.
+        if was > 0 and now < was * keep and (was - now) >= floor:
             lost.append("%s had %d, now has %d" % (key, was, now))
 
-    if not lost:
-        note("SHRINK GUARD ok: %d events across %d feeds, none of them down "
-             "on the last published run" % (total, len(feed_counts)))
-        return False
-
-    note("ERROR shrink guard: the calendar has NOT been overwritten, because "
-         "%d feed(s) lost fixtures since the last published run: %s. Look at "
-         "the SKIPPED and FEED lines above. A timeout fixes itself on the "
-         "next run two hours later. If the drop is real, because a season "
-         "slug was rolled over here, run the workflow by hand from the "
-         "Actions tab with allow_shrink ticked."
-         % (len(lost), "; ".join(lost)))
-    return True
+    add_check("feed counts", not lost,
+              "%d events across %d feeds, none of them far below their best"
+              % (total, len(feed_counts)) if not lost else
+              "; ".join(lost),
+              "Build warning: %d feed(s) have lost most of their fixtures: %s"
+              % (len(lost), "; ".join(lost)))
+    return peaks
 
 
 def main():
@@ -2216,10 +2233,8 @@ def main():
         note("ERROR no events produced, refusing to overwrite the calendar")
         write_diagnostics()
         return 1
-    if shrink_guard_trips(count):
-        write_diagnostics()
-        return 1
-    save_feed_counts(count)
+    peaks = shrink_guard(count)
+    save_feed_counts(count, peaks)
     check_notes(body)
     run_checks()
 

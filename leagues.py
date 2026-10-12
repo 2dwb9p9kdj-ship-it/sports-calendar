@@ -409,7 +409,14 @@ ICS_SOURCES = [
      "international": True, "only_tags": None,
      "competition": "Australia International",
      "stage_from": ["description 1"],
-     "skip_if_contains": ["Ticket Alert", "\U0001f3ab"],
+     # This feed carries more than fixtures. As well as ticket alerts it
+     # publishes YouTube highlights entries, whose titles carry the score in
+     # plain text ("Germany Women 4 - Australia Women 4"), so the parser reads
+     # the 4 as part of the team name and the event is a spoiler as well as
+     # clutter. Both markers are listed because either alone would be one
+     # feed change away from letting them back in.
+     "skip_if_contains": ["Ticket Alert", "\U0001f3ab",
+                          "Match Highlights", "▶"],
      "names": {"Matildas": "Australia", "Australia Women": "Australia",
                "Colombia Women": "Colombia", "Germany Women": "Germany",
                "Haiti Women": "Haiti", "England Women": "England",
@@ -475,21 +482,29 @@ OUTPUT_DIR = "docs"
 OUTPUT_FILE = "calendar.ics"
 
 # A feed that times out does not raise an error, it just returns nothing, so
-# the build used to publish a calendar with a whole league missing from it and
-# still report success. Every run now publishes docs/feed_counts.json next to
-# the calendar, and the next run reads it back and compares feed by feed. If
-# a feed that had fixtures last time now has less than this fraction of them,
-# the build refuses to overwrite the calendar and fails instead, which sends
-# the usual GitHub email about a failed workflow.
+# the build will happily publish a calendar with a whole league missing from
+# it. Every run publishes docs/feed_counts.json next to the calendar, holding
+# each feed's count and its best ever, and the next run reads it back and
+# compares feed by feed.
 #
-# 0.75 lets a feed shed a quarter of its fixtures without complaint, which
-# covers a knockout competition withholding the next round, and still catches
-# a whole league going missing. Set to 0 to turn the check off.
+# A feed below MIN_FEED_FRACTION of its best raises a build warning, which
+# reaches the 9pm notification and the unlock page like any other failed
+# check. It does NOT block the publish. Blocking was tried from 8 to 12
+# October and locked itself on: a refusal publishes nothing, so the counts it
+# compares against never moved, so every later run refused for the same
+# reason and the calendar went stale for two days.
+#
+# Both tests must fail before it says anything, because the fraction alone
+# cries wolf on a small feed: a knockout competition withholding one of three
+# fixtures is a 33% drop and entirely normal. MIN_FEED_DROP is the smallest
+# number of lost fixtures worth mentioning. Set MIN_FEED_FRACTION to 0 to
+# turn the whole thing off.
 #
 # When a drop is real, because a season slug was rolled over here, run the
-# workflow by hand from the Actions tab with allow_shrink ticked. That run
-# publishes the new counts and the scheduled runs carry on from there.
+# workflow by hand from the Actions tab with allow_shrink ticked. That resets
+# every feed's best ever to today's count and silences the warning.
 MIN_FEED_FRACTION = 0.75
+MIN_FEED_DROP = 3
 PUBLISHED_COUNTS_URL = ("https://2dwb9p9kdj-ship-it.github.io/"
                         "sports-calendar/feed_counts.json")
 
