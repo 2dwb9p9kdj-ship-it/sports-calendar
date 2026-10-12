@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1321,7 +1322,7 @@ RC_KEEP = {"DRS", "SC", "VSC", "FIA", "TBC", "GP", "F1", "DNF", "DNS", "DSQ"}
 # Bumped whenever the stored results would be written differently. A stored
 # session whose marker does not match is looked up again, while still being
 # shown, so the calendar never goes blank during a rebuild.
-F1_BUILD = 2
+F1_BUILD = 3
 
 # Race control ends every message about an incident with the time the incident
 # happened, and repeats that time on each follow-up. It is therefore the
@@ -1447,6 +1448,27 @@ def _gap_text(value):
     return "+%.3f" % seconds
 
 
+def _as_int(value):
+    """OpenF1's number fields, as an int, or None.
+
+    Nothing from that API may be assumed to be a number. It has already
+    changed shape twice under us: qualifying duration became a list of three,
+    and the NHL-style removal of a field. On 12 October a position or lap
+    count arrived as a string, and because the code sorted on
+    `row.get("laps") or 0` the string met the int 0 in the same list and the
+    whole Formula 1 builder died with "'<' not supported between instances of
+    'str' and 'int'". Every number is coerced here, at the point it enters,
+    rather than trusted at each of the dozen places it is used."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _ordinal(number):
     try:
         value = int(number)
@@ -1523,19 +1545,20 @@ def f1_classification(cache, session_key):
     def order(row):
         """Classified by position, then retirements by distance covered,
         which is how a timing screen lists them."""
-        position = row.get("position")
+        position = _as_int(row.get("position"))
         if position:
             return (0, position, 0)
-        return (1, 0, -(row.get("number_of_laps") or 0))
+        return (1, 0, -(_as_int(row.get("number_of_laps")) or 0))
 
     out = []
     for row in sorted(rows, key=order):
         number = str(row.get("driver_number"))
         who = drivers.get(number, {"name": "Car %s" % number, "team": "",
                                    "code": ""})
-        out.append({"position": row.get("position"), "number": number,
+        out.append({"position": _as_int(row.get("position")), "number": number,
                     "name": who["name"], "team": who["team"],
-                    "code": who["code"], "laps": row.get("number_of_laps"),
+                    "code": who["code"],
+                    "laps": _as_int(row.get("number_of_laps")),
                     "duration": row.get("duration"),
                     "gap": row.get("gap_to_leader"),
                     "dnf": bool(row.get("dnf")), "dns": bool(row.get("dns")),
@@ -1576,12 +1599,13 @@ def f1_grid(quali_key, race_key, classification):
             break
     if not rows:
         return None
-    qualified = {row["number"]: row["position"] for row in classification or []}
+    qualified = {row["number"]: _as_int(row.get("position"))
+                 for row in classification or []}
     out = []
-    for row in sorted(rows, key=lambda r: r.get("position") or 99):
+    for row in sorted(rows, key=lambda r: _as_int(r.get("position")) or 99):
         number = str(row.get("driver_number"))
-        out.append({"position": row.get("position"), "number": number,
-                    "qualified": qualified.get(number)})
+        out.append({"position": _as_int(row.get("position")),
+                    "number": number, "qualified": qualified.get(number)})
     return out
 
 
@@ -1688,8 +1712,10 @@ def f1_incidents(session_key, kind, classification):
             lines.append(line)
 
     # Who set the pace.
+    # Sorted through _as_int, not on the raw value, so a record stored before
+    # 12 October with a string in it renders instead of killing the builder.
     ranked = [row for row in classification or [] if row.get("position")]
-    ranked.sort(key=lambda row: row["position"])
+    ranked.sort(key=lambda row: _as_int(row.get("position")) or 99)
     if len(ranked) >= 2:
         raw = _last_set_time(ranked[1].get("gap"))
         margin = None
@@ -1719,16 +1745,17 @@ def f1_incidents(session_key, kind, classification):
 
     # A driver who barely ran is usually a driver with a problem.
     if kind == "practice":
-        counts = sorted(row.get("laps") or 0 for row in classification or [])
+        counts = sorted(_as_int(row.get("laps")) or 0
+                        for row in classification or [])
         if len(counts) >= 5 and counts[len(counts) // 2] > 0:
             median = counts[len(counts) // 2]
             quiet = [row for row in classification or []
-                     if (row.get("laps") or 0) and row["laps"] < median * 0.7]
+                     if 0 < (_as_int(row.get("laps")) or 0) < median * 0.7]
             if quiet:
-                fewest = min(quiet, key=lambda row: row["laps"])
+                fewest = min(quiet, key=lambda row: _as_int(row["laps"]) or 0)
+                laps = _as_int(fewest["laps"]) or 0
                 add("%s completed only %d lap%s, fewest of anyone"
-                    % (fewest["name"], fewest["laps"],
-                       "" if fewest["laps"] == 1 else "s"))
+                    % (fewest["name"], laps, "" if laps == 1 else "s"))
 
     return lines[:getattr(cfg, "F1_BULLET_LIMIT", 6)]
 
@@ -1747,7 +1774,8 @@ def f1_result_lines(record, kind):
         groups = [(heads[0], 1, 10), (heads[1], 11, second),
                   (heads[2], second + 1, total)]
         for head, first, last in groups:
-            block = [row for row in ranked if first <= row["position"] <= last]
+            block = [row for row in ranked
+                     if first <= (_as_int(row.get("position")) or 0) <= last]
             if not block:
                 continue
             if lines:
@@ -1756,7 +1784,8 @@ def f1_result_lines(record, kind):
             for row in block:
                 shown = _lap_time(_last_set_time(row.get("duration")))
                 lines.append("%d. %s (%s) %s"
-                             % (row["position"], row["name"], row["team"],
+                             % (_as_int(row.get("position")) or 0,
+                                row["name"], row["team"],
                                 shown or "no time"))
         grid = record.get("grid")
         if grid:
@@ -1764,11 +1793,12 @@ def f1_result_lines(record, kind):
             lines.append("Starting grid")
             for row in grid:
                 name = record.get("names", {}).get(row["number"], row["number"])
-                dropped = (row.get("qualified")
-                           and row["qualified"] < row["position"])
+                slot = _as_int(row.get("position")) or 0
+                came = _as_int(row.get("qualified"))
+                dropped = came is not None and came < slot
                 lines.append("%d. %s%s"
-                             % (row["position"], name,
-                                " (qualified %s)" % _ordinal(row["qualified"])
+                             % (slot, name,
+                                " (qualified %s)" % _ordinal(came)
                                 if dropped else ""))
 
     elif kind in ("race", "sprint"):
@@ -1783,7 +1813,7 @@ def f1_result_lines(record, kind):
                 value, out = "DNS", True
             elif row.get("dnf"):
                 value, out = "DNF", True
-            elif row.get("position") == 1:
+            elif _as_int(row.get("position")) == 1:
                 value = _race_time(row.get("duration")) or ""
             else:
                 value = (_gap_text(row.get("gap"))
@@ -1791,28 +1821,28 @@ def f1_result_lines(record, kind):
             # A retirement is worth more with the distance it reached, and
             # OpenF1 gives no finishing position to a car too far behind to
             # be classified, so the numbering carries on instead.
-            laps = row.get("laps")
+            laps = _as_int(row.get("laps"))
             if out and laps:
                 value += ", %d lap%s" % (laps, "" if laps == 1 else "s")
             mark = ""
             if fastest.get("number") == row["number"]:
                 mark = " (fastest lap %s)" % _lap_time(fastest.get("seconds"))
             lines.append("%s. %s (%s) %s%s"
-                         % (row.get("position") or place, row["name"],
-                            row["team"], value, mark))
+                         % (_as_int(row.get("position")) or place,
+                            row["name"], row["team"], value, mark))
 
     else:  # practice
         for row in rows:
-            if row.get("position") == 1:
+            if _as_int(row.get("position")) == 1:
                 value = _lap_time(row.get("duration")) or "no time"
             else:
                 value = (_gap_text(row.get("gap"))
                          or _lap_time(row.get("duration")) or "no time")
-            laps = row.get("laps")
+            laps = _as_int(row.get("laps"))
             tail = ", %d lap%s" % (laps, "" if laps == 1 else "s") if laps else ""
             lines.append("%s. %s (%s) %s%s"
-                         % (row.get("position") or "-", row["name"],
-                            row["team"], value, tail))
+                         % (_as_int(row.get("position")) or "-",
+                            row["name"], row["team"], value, tail))
 
     bullets = record.get("bullets") or []
     if bullets:
@@ -2224,8 +2254,16 @@ def main():
     try:
         body.extend(build_f1_events())
     except Exception as err:  # noqa: BLE001
-        note("F1 builder failed (%s), the rest of the calendar is unaffected"
-             % err)
+        # The file and line, not just the message. "'<' not supported between
+        # instances of 'str' and 'int'" on its own cost two days on
+        # 12 October, because it could have come from any of a dozen sorts.
+        where = traceback.extract_tb(sys.exc_info()[2])
+        spot = ("%s line %d, in %s" % (os.path.basename(where[-1].filename),
+                                       where[-1].lineno, where[-1].name)
+                if where else "unknown")
+        note("F1 builder failed at %s: %s: %s. The rest of the calendar is "
+             "unaffected, but Formula 1 is missing from it."
+             % (spot, type(err).__name__, err))
 
     count = len([1 for line in body if line == "BEGIN:VEVENT"])
     note("TOTAL events written: %d" % count)
