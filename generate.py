@@ -425,6 +425,11 @@ def build_league_events(league):
     sport = cfg.SPORTS[league["sport"]]
     slugs = league["slug"] if isinstance(league["slug"], list) else [league["slug"]]
 
+    # A finished season Sean keeps so he can look a game up by its date years
+    # later. Nothing in it can be a spoiler, so the scores always show, the
+    # unlock list never hears about it, and it never withholds a fixture.
+    history = bool(league.get("history"))
+
     # Claim the slot now, so a feed that fails records a zero rather than
     # dropping out of the counts and looking like a slug that was renamed.
     feed_counts.setdefault("feed:%s" % slugs[0], 0)
@@ -463,6 +468,8 @@ def build_league_events(league):
             number = row.get("matchnumber")
             if number is None:
                 continue
+            if history:
+                break     # a finished season holds nothing back
             if not is_watched("%s-%s@sports-calendar" % (slugs[0], number)):
                 locked_result = True
                 break
@@ -502,7 +509,7 @@ def build_league_events(league):
         played = home_score is not None or awaiting_score(start)
         plain_home, plain_away = home_label, away_label
         if cfg.INCLUDE_SCORES and played:
-            if is_watched(uid):
+            if history or is_watched(uid):
                 if home_score is not None:
                     home_label += " [%s]" % home_score
                     away_label += " [%s]" % away_score
@@ -540,7 +547,9 @@ def build_league_events(league):
     # A competition with no fixtures left anywhere is the signal that the feed
     # needs rolling over to next season's address. Your own team running out of
     # fixtures just means they are done for the year, which is not the same.
-    if not feed_upcoming:
+    if history:
+        pass          # of course it is over, that is what history means
+    elif not feed_upcoming:
         note("SEASON OVER %s has no fixtures left in the whole competition, "
              "roll the slug to next season when it is published" % slugs[0])
     elif count and not upcoming:
@@ -2251,6 +2260,60 @@ def shrink_guard(total):
     return peaks
 
 
+SEASON_SLUG = re.compile(r"^(.*)-(\d{4})$")
+
+
+def shift_season(text, year, back):
+    """Move a stage line back a season: 2026/27 -> 2025/26, 2026 -> 2025."""
+    if not text:
+        return text
+    older = year - back
+    pair = "%d/%02d" % (year, (year + 1) % 100)
+    text = text.replace(pair, "%d/%02d" % (older, (older + 1) % 100))
+    return re.sub(r"\b%d\b" % year, str(older), text)
+
+
+def history_leagues():
+    """Past seasons of every competition, so finished games stay lookupable.
+
+    The slugs are worked out from the live ones rather than written out by
+    hand, so the depth of the archive is a single number in leagues.py. A
+    competition that did not run in a given year, a World Cup in an odd
+    year say, simply returns nothing: the feed loader already treats an
+    absent slug as an empty one, and it claims its slot at zero, so a
+    season that never existed cannot look like a feed that died.
+    """
+    years = getattr(cfg, "HISTORY_YEARS", 0)
+    if not years:
+        return []
+    out, seen = [], set()
+    live = set()
+    sources = list(cfg.LEAGUES) + list(getattr(cfg, "HISTORY_EXTRA", []))
+    for league in sources:
+        slug = league["slug"]
+        slug = slug[0] if isinstance(slug, list) else slug
+        live.add(slug)
+    for league in sources:
+        slug = league["slug"]
+        slug = slug[0] if isinstance(slug, list) else slug
+        match = SEASON_SLUG.match(slug)
+        if not match:
+            continue
+        stem, year = match.group(1), int(match.group(2))
+        for back in range(1, years + 1):
+            past = "%s-%d" % (stem, year - back)
+            if past in seen or past in live:
+                continue
+            seen.add(past)
+            entry = dict(league)
+            entry["slug"] = past
+            entry["history"] = True
+            entry["knockout"] = False
+            entry["stage"] = shift_season(entry.get("stage", ""), year, back)
+            out.append(entry)
+    return out
+
+
 def main():
     print("Building calendar...")
     watched.update(load_watched())
@@ -2258,6 +2321,11 @@ def main():
     body = []
     for league in cfg.LEAGUES:
         body.extend(build_league_events(league))
+    past = history_leagues()
+    if past:
+        print("Past seasons: %d" % len(past))
+        for league in past:
+            body.extend(build_league_events(league))
     body.extend(build_official_events())
     body.extend(build_ics_events())
     body.extend(build_manual_events())

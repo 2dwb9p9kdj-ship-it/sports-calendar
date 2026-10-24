@@ -149,9 +149,9 @@ LEAGUES = [
      "stage": "2026/27 Season, {round}"},
 
     # ---- Baseball, ice hockey, American football --------------------------
-    {"slug": "mlb-2026", "sport": "baseball", "gender": "M",
+    {"slug": "mlb-2027", "sport": "baseball", "gender": "M",
      "follow": ["Colorado Rockies"], "names": {},
-     "competition": "Major League Baseball", "stage": "2026 Regular Season"},
+     "competition": "Major League Baseball", "stage": "2027 Regular Season"},
 
     {"slug": "nfl-2026", "sport": "american_football", "gender": "M",
      "follow": ["Denver Broncos"], "names": {},
@@ -305,6 +305,32 @@ OFFICIAL_SOURCES = [
      "competition": "National Hockey League",
      "fallback": {"slug": "nhl-2026", "follow": ["Colorado Avalanche"],
                   "stage": "2026/27 Regular Season"}},
+]
+
+# ---------------------------------------------------------------------------
+# Past seasons
+# ---------------------------------------------------------------------------
+# How many finished seasons to keep behind each competition above, so a game
+# from years ago can still be found in the calendar under the date it was
+# played. These are never spoilers: their scores always show and they never
+# appear on the unlock page.
+#
+# The slugs are worked out from the live ones, so this is the only number to
+# change. Set it to 0 to switch the archive off entirely.
+HISTORY_YEARS = 5
+
+# Competitions Sean only wants history for. The live fixtures for these come
+# from an ICS feed or an official API above, so the fixturedownload slug named
+# here is never loaded itself, only the seasons behind it.
+HISTORY_EXTRA = [
+    {"slug": "nba-2026", "sport": "basketball_us", "gender": "M",
+     "follow": ["Denver Nuggets"], "names": {},
+     "competition": "NBA", "stage": "2026/27 Regular Season"},
+
+    {"slug": "nhl-2026", "sport": "ice_hockey", "gender": "M",
+     "follow": ["Colorado Avalanche"], "names": {},
+     "competition": "National Hockey League",
+     "stage": "2026/27 Regular Season"},
 ]
 
 # Stage wording per game type
