@@ -134,7 +134,7 @@
 
 <script>
 const REPO = "2dwb9p9kdj-ship-it/sports-calendar";
-const VERSION = "v3";
+const VERSION = "v4";
 let items = [], stage = 0;
 
 const $ = id => document.getElementById(id);
@@ -158,15 +158,56 @@ function stampVersion() {
 function showWarnings(list) {
   const box = $("warnings");
   box.textContent = "";
-  list.forEach(text => {
+  list.forEach(entry => {
+    // An entry is either a plain string from the build, or an object with
+    // its own heading, which is how the staleness banner below says
+    // something different from an ordinary failed check.
+    const text = (typeof entry === "string") ? entry : entry.text;
+    const title = (typeof entry === "string")
+      ? "Something needs looking at" : entry.head;
     const div = document.createElement("div");
     div.className = "warn";
     const head = document.createElement("b");
-    head.textContent = "Something needs looking at";
+    head.textContent = title;
     div.appendChild(head);
     div.appendChild(document.createTextNode(text));
     box.appendChild(div);
   });
+}
+
+// How old the data may be before this page says so, in hours. The build is
+// meant to run every two hours, so three hours means one missed run passes
+// quietly and two do not.
+const STALE_AFTER_HOURS = 3;
+
+// Everything that protects this calendar lives inside a build: the checks,
+// the shrink guard, the warning written into notify.txt. None of it can
+// notice a build that never ran, and on 23 October 2026 the page sat for
+// most of a day showing confident, wrong information while the 9pm alarm
+// fired off it twice. This is the one check that runs on the phone instead,
+// so it still works when nothing else does.
+function stalenessWarning(generated) {
+  if (!generated) {
+    return { head: "Cannot tell how old this is",
+             text: "This page could not find a build time in pending.json, "
+                 + "so it cannot tell you whether the list below is current." };
+  }
+  const built = new Date(generated);
+  if (isNaN(built)) {
+    return { head: "Cannot tell how old this is",
+             text: "The build time in pending.json could not be read, so "
+                 + "this page cannot tell you whether the list is current." };
+  }
+  const hours = (Date.now() - built.getTime()) / 3600000;
+  if (hours < STALE_AFTER_HOURS) return null;
+  const age = hours < 48
+    ? Math.round(hours) + " hours"
+    : Math.round(hours / 24) + " days";
+  return { head: "This list is out of date",
+           text: "The last build was " + age + " ago, at "
+               + fmtDay(built) + " " + fmtTime(built)
+               + ". Anything that finished since then is missing from the "
+               + "list below, so treat it as incomplete until a build runs." };
 }
 
 async function load() {
@@ -176,7 +217,9 @@ async function load() {
                             { cache: "no-store" });
     const data = await res.json();
     items = (data.pending || []).map(x => ({ ...x, when: parseDate(x.date) }));
-    showWarnings(data.warnings || []);
+    const stale = stalenessWarning(data.generated);
+    showWarnings(stale ? [stale].concat(data.warnings || [])
+                       : (data.warnings || []));
   } catch (err) {
     $("subheading").textContent = "Could not load pending.json";
     return;
