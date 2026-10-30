@@ -432,7 +432,12 @@ def build_league_events(league):
 
     # Claim the slot now, so a feed that fails records a zero rather than
     # dropping out of the counts and looking like a slug that was renamed.
-    feed_counts.setdefault("feed:%s" % slugs[0], 0)
+    # Past seasons are counted under "past:" so the shrink guard can ignore
+    # them: a finished season cannot gain or lose a fixture, and if
+    # fixturedownload ever retires one there is nothing Sean could do about
+    # it, so an alarm would be noise rather than news.
+    count_key = ("past:%s" if history else "feed:%s") % slugs[0]
+    feed_counts.setdefault(count_key, 0)
 
     rows, used_url = None, None
     for slug in slugs:
@@ -557,7 +562,7 @@ def build_league_events(league):
              "fixtures left in it" % slugs[0])
 
     print("  %s: %d events kept" % (slugs[0], count))
-    feed_counts["feed:%s" % slugs[0]] = count
+    feed_counts[count_key] = count
     return events
 
 
@@ -2235,6 +2240,7 @@ def shrink_guard(total):
     # is then quietly accepted as the new normal, which is the exact silence
     # this is meant to break.
     before = previous.get("peaks") or previous.get("feeds") or {}
+    last = previous.get("feeds") or {}
     if not before:
         return peaks
 
@@ -2243,13 +2249,36 @@ def shrink_guard(total):
         if key not in feed_counts:
             continue      # the slug was renamed here, so there is nothing
                           # to compare it against
+        if key.startswith("past:"):
+            continue      # a finished season, see build_league_events
         now = feed_counts[key]
         peaks[key] = max(now, was)
+
+        # A feed that carried fixtures and now carries none is always worth
+        # saying, however small it was. The floor below is a threshold on the
+        # number of fixtures lost, so on a feed that only ever had two it can
+        # never be reached, and the feed would fall silent for good. That is
+        # how the Football Australia feed ended up unwatched on 30 October
+        # after its mark was reset to two.
+        if was > 0 and now == 0:
+            lost.append("%s had %d, now has none" % (key, was))
+            continue
+
         # Both tests must fail before this says anything. The fraction alone
         # cries wolf on a small feed: a knockout competition withholding one
         # of three fixtures is a 33% drop and entirely normal.
         if was > 0 and now < was * keep and (was - now) >= floor:
-            lost.append("%s had %d, now has %d" % (key, was, now))
+            # One short answer is not a dying feed. fixtur.es served five
+            # Chelsea women fixtures on the evening of 29 October and eight
+            # again the next morning, which raised a warning that then stuck
+            # because the peak never moves back down. So the drop has to
+            # still be there on the following build before it is reported.
+            # The cost is that a real collapse is announced one build late,
+            # about two hours, which is worth paying to keep the banner
+            # meaningful.
+            then = last.get(key)
+            if then is None or (then < was * keep and (was - then) >= floor):
+                lost.append("%s had %d, now has %d" % (key, was, now))
 
     add_check("feed counts", not lost,
               "%d events across %d feeds, none of them far below their best"
