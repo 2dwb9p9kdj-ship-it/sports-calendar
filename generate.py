@@ -1949,136 +1949,154 @@ def build_f1_events():
     sampled = set()
 
     for race in reversed(races):
-        grand_prix = race.get("raceName", "Grand Prix")
-        circuit = race.get("Circuit", {}).get("circuitName", "")
-        round_no = race.get("round", "")
+        # One bad weekend used to cost every Formula 1 event in the
+        # build, because the whole builder was a single try block: a
+        # string where a number was expected in round 16 would delete
+        # round 1 as well. Each weekend now fails on its own and the
+        # other twenty-three still publish. The cache is not touched
+        # here, so nothing is lost by skipping one.
+        try:
+            grand_prix = race.get("raceName", "Grand Prix")
+            circuit = race.get("Circuit", {}).get("circuitName", "")
+            round_no = race.get("round", "")
 
-        # Every session of this weekend, in one list, so qualifying can reach
-        # the grid that belongs to the race.
-        planned = []
-        for key, (label, minutes) in cfg.F1_SESSIONS.items():
-            if key == "Race":
-                block = {"date": race.get("date"), "time": race.get("time")}
-            else:
-                block = race.get(key)
-            if not block:
-                continue
-            if label.startswith("Practice") and not cfg.F1_INCLUDE_PRACTICE:
-                continue
-            start = parse_iso_date_time(block.get("date"), block.get("time"))
-            if not start:
-                continue
-            planned.append({"key": key, "label": label, "minutes": minutes,
-                            "start": start, "kind": f1_kind(label)})
-
-        by_kind = {item["kind"]: item for item in planned}
-
-        for item in planned:
-            label, start = item["label"], item["start"]
-            kind, minutes = item["kind"], item["minutes"]
-            title = "%s F1: %s (%s)" % (sport["emoji"], label, grand_prix)
-            uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no,
-                                                   item["key"])
-            notes = "%s\nRound %s" % (cfg.F1_COMPETITION, round_no)
-            count += 1
-
-            # Nothing to look up until the session is over and OpenF1 has
-            # released it, which is 30 minutes after the finish.
-            ended = start + dt.timedelta(minutes=minutes or 60)
-            ready = results_on and NOW > ended + dt.timedelta(minutes=40)
-
-            record = None
-            if ready:
-                match = f1_match(index, label, start)
-                if match is None:
-                    unmatched += 1
+            # Every session of this weekend, in one list, so qualifying can reach
+            # the grid that belongs to the race.
+            planned = []
+            for key, (label, minutes) in cfg.F1_SESSIONS.items():
+                if key == "Race":
+                    block = {"date": race.get("date"), "time": race.get("time")}
                 else:
-                    session_key = str(match["key"])
-                    record = stored.get(session_key)
-                    settled = NOW > ended + finalise
-                    needs_rows = (record is None or not record.get("final")
-                                  or record.get("build") != F1_BUILD)
-                    if record is not None and record.get("build") != F1_BUILD:
-                        rebuilt += 1
+                    block = race.get(key)
+                if not block:
+                    continue
+                if label.startswith("Practice") and not cfg.F1_INCLUDE_PRACTICE:
+                    continue
+                start = parse_iso_date_time(block.get("date"), block.get("time"))
+                if not start:
+                    continue
+                planned.append({"key": key, "label": label, "minutes": minutes,
+                                "start": start, "kind": f1_kind(label)})
 
-                    # The grid can still change on Saturday night, so it is
-                    # looked at again until the race has actually started.
-                    target = None
-                    if kind == "qualifying":
-                        target = by_kind.get("race")
-                    elif kind == "sprint_qualifying":
-                        target = by_kind.get("sprint")
-                    needs_grid = False
-                    if target is not None and NOW > ended:
-                        needs_grid = (record is None
-                                      or not record.get("grid_final"))
+            by_kind = {item["kind"]: item for item in planned}
 
-                    if (needs_rows or needs_grid) and (fetched >= budget
-                                                       or _openf1_off[0]):
-                        waiting += 1
-                    elif needs_rows or needs_grid:
-                        fetched += 1
-                        record = dict(record or {})
-                        if needs_rows:
-                            rows = f1_classification(cache, session_key)
-                            if rows is not None:
-                                record["rows"] = rows
-                                record["bullets"] = f1_incidents(
-                                    session_key, kind, rows)
-                                record["final"] = settled
-                                record["build"] = F1_BUILD
-                                if kind in ("race", "sprint"):
-                                    record["fastest"] = f1_fastest_lap(
-                                        session_key)
-                        if needs_grid and record.get("rows"):
-                            race_match = f1_match(index, target["label"],
-                                                  target["start"])
-                            grid = None
-                            if race_match is not None:
-                                grid = f1_grid(session_key,
-                                               str(race_match["key"]),
-                                               record["rows"])
-                            if grid:
-                                record["grid"] = grid
-                                record["names"] = {
-                                    row["number"]: row["name"]
-                                    for row in record["rows"]}
-                            # Stop looking once the race is under way, even if
-                            # no grid was ever published, or every build would
-                            # keep asking for something that is not coming.
-                            record["grid_final"] = NOW > target["start"]
-                            if not grid and record["grid_final"]:
-                                no_grid += 1
-                        if record.get("rows"):
-                            stored[session_key] = record
+            for item in planned:
+                label, start = item["label"], item["start"]
+                kind, minutes = item["kind"], item["minutes"]
+                title = "%s F1: %s (%s)" % (sport["emoji"], label, grand_prix)
+                uid = "f1-%s-%s-%s@sports-calendar" % (cfg.F1_SEASON, round_no,
+                                                       item["key"])
+                notes = "%s\nRound %s" % (cfg.F1_COMPETITION, round_no)
+                count += 1
 
-            if record and record.get("rows"):
-                if kind in F1_LOCKED_KINDS and not is_watched(uid):
-                    add_pending(uid, "F1 %s (%s)" % (label, grand_prix),
-                                start, cfg.F1_COMPETITION)
-                    locked += 1
-                else:
-                    body = f1_result_lines(record, kind)
-                    if not body and (record.get("rows") or record.get("bullets")):
-                        empty_results += 1
-                    if body:
-                        notes += "\n\n" + "\n".join(body)
-                        shown += 1
-                        # One sample per session type, so a run that goes
-                        # green while producing nonsense is visible here.
-                        if kind not in sampled:
-                            sampled.add(kind)
-                            example = next((line for line in body
-                                            if "(" in line), body[0])
-                            note("F1 sample %s: %s" % (label, example))
-                            # A bullet too, since the classification can be
-                            # perfect while the written commentary is wrong.
-                            bullet = next((line for line in body
-                                           if line.startswith("- ")), None)
-                            note("F1 bullet %s: %s"
-                                 % (label, bullet or "none in this session"))
+                # Nothing to look up until the session is over and OpenF1 has
+                # released it, which is 30 minutes after the finish.
+                ended = start + dt.timedelta(minutes=minutes or 60)
+                ready = results_on and NOW > ended + dt.timedelta(minutes=40)
 
-            events.extend(make_event(uid, title, start, minutes, circuit, notes))
+                record = None
+                if ready:
+                    match = f1_match(index, label, start)
+                    if match is None:
+                        unmatched += 1
+                    else:
+                        session_key = str(match["key"])
+                        record = stored.get(session_key)
+                        settled = NOW > ended + finalise
+                        needs_rows = (record is None or not record.get("final")
+                                      or record.get("build") != F1_BUILD)
+                        if record is not None and record.get("build") != F1_BUILD:
+                            rebuilt += 1
+
+                        # The grid can still change on Saturday night, so it is
+                        # looked at again until the race has actually started.
+                        target = None
+                        if kind == "qualifying":
+                            target = by_kind.get("race")
+                        elif kind == "sprint_qualifying":
+                            target = by_kind.get("sprint")
+                        needs_grid = False
+                        if target is not None and NOW > ended:
+                            needs_grid = (record is None
+                                          or not record.get("grid_final"))
+
+                        if (needs_rows or needs_grid) and (fetched >= budget
+                                                           or _openf1_off[0]):
+                            waiting += 1
+                        elif needs_rows or needs_grid:
+                            fetched += 1
+                            record = dict(record or {})
+                            if needs_rows:
+                                rows = f1_classification(cache, session_key)
+                                if rows is not None:
+                                    record["rows"] = rows
+                                    record["bullets"] = f1_incidents(
+                                        session_key, kind, rows)
+                                    record["final"] = settled
+                                    record["build"] = F1_BUILD
+                                    if kind in ("race", "sprint"):
+                                        record["fastest"] = f1_fastest_lap(
+                                            session_key)
+                            if needs_grid and record.get("rows"):
+                                race_match = f1_match(index, target["label"],
+                                                      target["start"])
+                                grid = None
+                                if race_match is not None:
+                                    grid = f1_grid(session_key,
+                                                   str(race_match["key"]),
+                                                   record["rows"])
+                                if grid:
+                                    record["grid"] = grid
+                                    record["names"] = {
+                                        row["number"]: row["name"]
+                                        for row in record["rows"]}
+                                # Stop looking once the race is under way, even if
+                                # no grid was ever published, or every build would
+                                # keep asking for something that is not coming.
+                                record["grid_final"] = NOW > target["start"]
+                                if not grid and record["grid_final"]:
+                                    no_grid += 1
+                            if record.get("rows"):
+                                stored[session_key] = record
+
+                if record and record.get("rows"):
+                    if kind in F1_LOCKED_KINDS and not is_watched(uid):
+                        add_pending(uid, "F1 %s (%s)" % (label, grand_prix),
+                                    start, cfg.F1_COMPETITION)
+                        locked += 1
+                    else:
+                        body = f1_result_lines(record, kind)
+                        if not body and (record.get("rows") or record.get("bullets")):
+                            empty_results += 1
+                        if body:
+                            notes += "\n\n" + "\n".join(body)
+                            shown += 1
+                            # One sample per session type, so a run that goes
+                            # green while producing nonsense is visible here.
+                            if kind not in sampled:
+                                sampled.add(kind)
+                                example = next((line for line in body
+                                                if "(" in line), body[0])
+                                note("F1 sample %s: %s" % (label, example))
+                                # A bullet too, since the classification can be
+                                # perfect while the written commentary is wrong.
+                                bullet = next((line for line in body
+                                               if line.startswith("- ")), None)
+                                note("F1 bullet %s: %s"
+                                     % (label, bullet or "none in this session"))
+
+                events.extend(make_event(uid, title, start, minutes, circuit, notes))
+        except Exception as err:  # noqa: BLE001
+            where = traceback.extract_tb(sys.exc_info()[2])
+            spot = ("%s line %d, in %s"
+                    % (os.path.basename(where[-1].filename),
+                       where[-1].lineno, where[-1].name)
+                    if where else "unknown")
+            note("F1 round %s (%s) failed at %s: %s: %s. Every other "
+                 "race weekend is unaffected."
+                 % (round_no or "?", grand_prix, spot,
+                    type(err).__name__, err))
+            continue
 
     feed_counts["f1:sessions"] = count
     add_check("f1 stored results", not empty_results,
